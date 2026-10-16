@@ -1,9 +1,11 @@
 package com.company.calltrainer
 
+import android.Manifest
 import android.app.Activity
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -19,6 +21,7 @@ import android.telecom.DisconnectCause
 import android.telecom.PhoneAccount
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
+import android.telecom.VideoProfile
 import android.view.Gravity
 import android.widget.Button
 import android.widget.EditText
@@ -41,13 +44,29 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // [단색 배경 해결 1] 최초 성공했던 순정 상태 그대로 통화 계정 등록
+        // 연락처 배경 매칭을 위한 권한 자동 요청
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.READ_PHONE_STATE), 2000)
+        }
+
         telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
         val componentName = ComponentName(this, FakeCallService::class.java)
-        phoneAccountHandle = PhoneAccountHandle(componentName, "HD_Voice_Trainer")
 
+        // [핵심] 단색으로 잠겨버린 이전 통화 계정을 깨끗이 삭제(초기화)
+        try {
+            val oldHandle = PhoneAccountHandle(componentName, "HD_Voice_Trainer")
+            telecomManager.unregisterPhoneAccount(oldHandle)
+        } catch (e: Exception) {}
+
+        // 실제 이동통신망(SIM) 속성을 부여한 새 통화 계정 등록
+        phoneAccountHandle = PhoneAccountHandle(componentName, "SIM_Secure_Line")
         val phoneAccount = PhoneAccount.builder(phoneAccountHandle, "HD Voice")
-            .setCapabilities(PhoneAccount.CAPABILITY_CALL_PROVIDER)
+            .setCapabilities(
+                PhoneAccount.CAPABILITY_CALL_PROVIDER or
+                PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION or
+                PhoneAccount.CAPABILITY_CONNECTION_MANAGER
+            )
+            .setSupportedUriSchemes(listOf(PhoneAccount.SCHEME_TEL))
             .build()
         telecomManager.registerPhoneAccount(phoneAccount)
 
@@ -60,7 +79,7 @@ class MainActivity : Activity() {
             setPadding(50, 80, 50, 80)
         }
 
-        // [수정 1 & 2] 맨 위 제목을 보안 콜 의미의 영어로 변경 + 아래 설명 삭제
+        // 1. 보안 콜 의미의 영문 제목
         val titleText = TextView(this).apply {
             text = "🔒 Team Call : Secure Line"
             textSize = 23f
@@ -70,7 +89,7 @@ class MainActivity : Activity() {
         }
         mainLayout.addView(titleText)
 
-        // [수정 3] 1단계 제목/설명 다 빼고 '연락처 불러오기'와 '수동 입력'만 심플하게 배치
+        // 2. 연락처 불러오기 및 수동 입력 (설명 제거)
         val step1Card = createCardLayout()
 
         val contactBtn = Button(this).apply {
@@ -107,7 +126,7 @@ class MainActivity : Activity() {
 
         numberInput = EditText(this).apply {
             hint = "전화번호 입력"
-            setText("010-9876-5432")
+            setText("01098765432") // 하이픈(-) 없이 숫자만 기본 입력
             textSize = 16f
             setPadding(35, 30, 35, 30)
             background = createRoundedBackground("#F8F9FA", 16f)
@@ -118,7 +137,7 @@ class MainActivity : Activity() {
         step1Card.addView(numberInput)
         mainLayout.addView(step1Card)
 
-        // [수정 4] 2단계 제목/설명 다 빼고 '5초 / 15초 / 1분 / 5분'만 심플하게 가로 한 줄 배치
+        // 3. 시간 선택 버튼만 심플하게 (5초 / 15초 / 1분 / 5분)
         val step2Card = createCardLayout()
 
         val timeRadioGroup = RadioGroup(this).apply {
@@ -126,19 +145,14 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
         }
 
-        val rb5Sec = createSimpleRadioButton(101, "5초", true)
-        val rb15Sec = createSimpleRadioButton(102, "15초", false)
-        val rb1Min = createSimpleRadioButton(103, "1분", false)
-        val rb5Min = createSimpleRadioButton(104, "5분", false)
-
-        timeRadioGroup.addView(rb5Sec)
-        timeRadioGroup.addView(rb15Sec)
-        timeRadioGroup.addView(rb1Min)
-        timeRadioGroup.addView(rb5Min)
+        timeRadioGroup.addView(createSimpleRadioButton(101, "5초", true))
+        timeRadioGroup.addView(createSimpleRadioButton(102, "15초", false))
+        timeRadioGroup.addView(createSimpleRadioButton(103, "1분", false))
+        timeRadioGroup.addView(createSimpleRadioButton(104, "5분", false))
         step2Card.addView(timeRadioGroup)
         mainLayout.addView(step2Card)
 
-        // [수정 5] 3단계 제목/설명 빼고 버튼을 보안 전화 실행 의미의 영어 문장으로 변경
+        // 4. 보안 전화 실행 영문 버튼
         val step3Card = createCardLayout()
 
         val startCallBtn = Button(this).apply {
@@ -151,7 +165,8 @@ class MainActivity : Activity() {
 
             setOnClickListener {
                 val name = nameInput.text.toString().ifBlank { "Unknown" }
-                val number = numberInput.text.toString().ifBlank { "01000000000" }
+                // 입력칸의 번호에서도 하이픈(-)을 완전히 제거
+                val number = numberInput.text.toString().replace(Regex("[^0-9+]"), "").ifBlank { "01000000000" }
 
                 val (delayMillis, timeLabel) = when (timeRadioGroup.checkedRadioButtonId) {
                     101 -> Pair(5000L, "5초")
@@ -173,7 +188,7 @@ class MainActivity : Activity() {
         step3Card.addView(startCallBtn)
         mainLayout.addView(step3Card)
 
-        // [수정 6] 하단 안내 문구 간결하게 변경
+        // 5. 하단 안내 문구
         val settingCard = createCardLayout()
         val helperText = TextView(this).apply {
             text = "전화가 안된다면 아래 버튼을 눌러서 'HD Voice' 스위치를 켜주세요."
@@ -214,10 +229,13 @@ class MainActivity : Activity() {
                     val nameIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
                     val numberIndex = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
                     val selectedName = if (nameIndex >= 0) cursor.getString(nameIndex) else ""
-                    val selectedNumber = if (numberIndex >= 0) cursor.getString(numberIndex) else ""
+                    val rawNumber = if (numberIndex >= 0) cursor.getString(numberIndex) else ""
+
+                    // 연락처에서 불러올 때부터 하이픈(-)을 싹 지우고 숫자만 입력칸에 넣기!
+                    val cleanNumber = rawNumber.replace(Regex("[^0-9+]"), "")
 
                     nameInput.setText(selectedName)
-                    numberInput.setText(selectedNumber)
+                    numberInput.setText(cleanNumber)
                 }
             }
         }
@@ -231,7 +249,7 @@ class MainActivity : Activity() {
             }
             telecomManager.addNewIncomingCall(phoneAccountHandle, extras)
         } catch (e: SecurityException) {
-            Toast.makeText(this, "하단의 [통화 허용 설정] 버튼을 눌러 'HD Voice'를 켜주세요.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "하단의 [통화 허용 설정] 버튼을 눌러 'HD Voice' 스위치를 다시 켜주세요.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -268,7 +286,6 @@ class MainActivity : Activity() {
     }
 }
 
-// [단색 배경 해결 2] 갤럭시 순정 통화 배경이 그대로 나오도록 번호 포맷 정제 및 오디오 속성 부여
 class FakeCallService : ConnectionService() {
     override fun onCreateIncomingConnection(
         connectionManagerPhoneAccount: PhoneAccountHandle?,
@@ -293,13 +310,12 @@ class FakeCallService : ConnectionService() {
 
         val extras = request?.extras
         val callerName = extras?.getString("CALLER_NAME") ?: "Unknown"
-        val rawNumber = extras?.getString("CALLER_NUMBER") ?: "01000000000"
+        val cleanNumber = (extras?.getString("CALLER_NUMBER") ?: "01000000000").replace(Regex("[^0-9+]"), "")
 
-        // 하이픈(-)이나 공백을 깨끗이 제거해서 갤럭시 순정 연락처 배경과 정확히 매칭되게 처리!
-        val cleanNumber = rawNumber.replace(Regex("[^0-9+]"), "")
-
-        connection.connectionProperties = Connection.PROPERTY_SELF_MANAGED.inv() and connection.connectionProperties
-        connection.audioModeIsVoip = false // VoIP(인터넷전화 단색 화면)가 아닌 일반 이동통신 전화 화면으로 강제 지정!
+        // 갤럭시 순정 통화 화면이 일반 HD Voice 통화로 인식하도록 전체 속성 부여
+        connection.connectionProperties = Connection.PROPERTY_HIGH_DEF_AUDIO
+        connection.audioModeIsVoip = false
+        connection.videoState = VideoProfile.STATE_AUDIO_ONLY
         connection.setAddress(Uri.fromParts("tel", cleanNumber, null), TelecomManager.PRESENTATION_ALLOWED)
         connection.setCallerDisplayName(callerName, TelecomManager.PRESENTATION_ALLOWED)
         connection.setRinging()
