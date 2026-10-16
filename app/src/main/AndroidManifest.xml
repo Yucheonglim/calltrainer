@@ -5,9 +5,10 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.CALL_PHONE" />
 
+    <!-- [전략 1 적용] 스마트폰 바탕화면에 깔릴 때는 'Team Call'로 표시됩니다 -->
     <application
         android:allowBackup="true"
-        android:label="HD Voice"
+        android:label="Team Call"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
@@ -20,6 +21,7 @@
             </intent-filter>
         </activity>
 
+        <!-- [전략 1 적용] 실제 전화가 올 때 갤럭시 통화 화면에는 감쪽같이 'HD Voice'로 표시됩니다 -->
         <service
             android:name=".FakeCallService"
             android:label="HD Voice"
