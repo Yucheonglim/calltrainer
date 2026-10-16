@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
-    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
-    <uses-permission android:name="android.permission.CALL_PHONE" />
-    <!-- 갤럭시 순정 전화 화면이 실제 연락처 배경을 불러오도록 하는 허가증 -->
+    <!-- 연락처 불러오기 및 진동/화면 켜기 권한 (절대 안 튕기는 안전한 권한만 사용) -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:allowBackup="true"
@@ -13,6 +12,7 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
+        <!-- 1. 설정 화면 -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -22,15 +22,14 @@
             </intent-filter>
         </activity>
 
-        <service
-            android:name=".FakeCallService"
-            android:label="HD Voice"
-            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.telecom.ConnectionService" />
-            </intent-filter>
-        </service>
+        <!-- 2. 단색이 아닌 최신 갤럭시 실제 그라데이션 배경을 띄워주는 전용 통화 화면 -->
+        <activity
+            android:name=".IncomingCallActivity"
+            android:exported="true"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
 
     </application>
 </manifest>
