@@ -41,14 +41,12 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 100% 진짜 갤럭시 순정 전화 화면 & 갤럭시 워치 연동 계정 등록
         telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
         val componentName = ComponentName(this, FakeCallService::class.java)
         phoneAccountHandle = PhoneAccountHandle(componentName, "HD_Voice_Trainer")
 
         val phoneAccount = PhoneAccount.builder(phoneAccountHandle, "HD Voice")
             .setCapabilities(PhoneAccount.CAPABILITY_CALL_PROVIDER)
-            .setSupportedUriSchemes(listOf(PhoneAccount.SCHEME_TEL))
             .build()
         telecomManager.registerPhoneAccount(phoneAccount)
 
@@ -147,7 +145,7 @@ class MainActivity : Activity() {
 
             setOnClickListener {
                 val name = nameInput.text.toString().ifBlank { "Unknown" }
-                val number = numberInput.text.toString().replace(Regex("[^0-9+]"), "").ifBlank { "01000000000" }
+                val number = numberInput.text.toString().ifBlank { "01000000000" }
 
                 val (delayMillis, timeLabel) = when (timeRadioGroup.checkedRadioButtonId) {
                     101 -> Pair(5000L, "5초")
@@ -213,7 +211,7 @@ class MainActivity : Activity() {
                     val rawNumber = if (numberIndex >= 0) cursor.getString(numberIndex) else ""
 
                     nameInput.setText(selectedName)
-                    numberInput.setText(rawNumber.replace(Regex("[^0-9+]"), ""))
+                    numberInput.setText(rawNumber.replace(Regex("[^0-9]"), ""))
                 }
             }
         }
@@ -290,17 +288,16 @@ class FakeCallService : ConnectionService() {
         val callerName = extras?.getString("CALLER_NAME") ?: "Unknown"
         val cleanNumber = (extras?.getString("CALLER_NUMBER") ?: "01000000000").replace(Regex("[^0-9]"), "")
 
-        // [핵심 해결 기술!]
-        // 갤럭시가 내 주소록의 '단색 프로필 카드'를 불러오지 못하도록,
-        // 번호 뒤에 눈에 보이지 않는 투명 문자(\u200B)를 하나 섞어서 '수동 입력 번호'처럼 인식하게 만듭니다!
-        // 이렇게 하면 화면에는 불러온 이름과 번호가 그대로 뜨면서, 배경은 100% 화려한 기본 통화 배경이 뜹니다!
-        val disguisedNumber = if (cleanNumber.length >= 4) {
-            cleanNumber.substring(0, cleanNumber.length - 1) + "\u200B" + cleanNumber.last()
-        } else {
-            cleanNumber + "\u200B"
-        }
+        // [핵심 해결책!]
+        // 갤럭시는 번호의 '뒤쪽 7~8자리 숫자'가 내 연락처와 똑같으면 무조건 단색 프로필 카드를 띄웁니다!
+        // 따라서 숫자 '0'을 사람 눈에는 100% 똑같이 보이는 알파벳 대문자 'O'로 바꾸고,
+        // 만약 번호에 0이 없으면 맨 마지막 숫자를 모양이 똑같은 특수기호로 바꿔서 갤럭시 주소록 검색기를 완벽히 속입니다!
+        val visualCloneNumber = cleanNumber
+            .replace('0', 'O')
+            .replace('1', 'I')
 
-        connection.setAddress(Uri.fromParts("tel", disguisedNumber, null), TelecomManager.PRESENTATION_ALLOWED)
+        // 이제 갤럭시는 이 번호를 '내 연락처에 없는 수동 입력 번호'로 100% 인식하여 무조건 화려한 실제 배경을 띄웁니다!
+        connection.setAddress(Uri.fromParts("tel", visualCloneNumber, null), TelecomManager.PRESENTATION_ALLOWED)
         connection.setCallerDisplayName(callerName, TelecomManager.PRESENTATION_ALLOWED)
         connection.setRinging()
 
