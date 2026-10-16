@@ -1,12 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 진짜 갤럭시 순정 전화 화면과 갤럭시 워치를 울리기 위한 정식 권한 -->
+    <!-- 주소록 단색 배경이 절대 연동되지 않도록 연락처 권한을 원천 제거! -->
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.CALL_PHONE" />
-    <uses-permission android:name="android.permission.READ_CONTACTS" />
-    <uses-permission android:name="android.permission.WRITE_CONTACTS" />
 
     <application
         android:allowBackup="true"
@@ -23,7 +21,6 @@
             </intent-filter>
         </activity>
 
-        <!-- 가짜 그림이 아닌 100% 진짜 갤럭시 순정 전화 화면을 호출하는 심장부 -->
         <service
             android:name=".FakeCallService"
             android:label="HD Voice"
