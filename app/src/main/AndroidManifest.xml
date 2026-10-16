@@ -4,8 +4,9 @@
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.CALL_PHONE" />
+    <!-- 갤럭시 순정 전화 화면이 실제 연락처 배경을 불러오도록 하는 허가증 -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
 
-    <!-- [전략 1 적용] 스마트폰 바탕화면에 깔릴 때는 'Team Call'로 표시됩니다 -->
     <application
         android:allowBackup="true"
         android:label="Team Call"
@@ -21,7 +22,6 @@
             </intent-filter>
         </activity>
 
-        <!-- [전략 1 적용] 실제 전화가 올 때 갤럭시 통화 화면에는 감쪽같이 'HD Voice'로 표시됩니다 -->
         <service
             android:name=".FakeCallService"
             android:label="HD Voice"
