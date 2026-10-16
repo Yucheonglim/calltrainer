@@ -35,14 +35,13 @@ class MainActivity : Activity() {
     private lateinit var phoneAccountHandle: PhoneAccountHandle
     private lateinit var nameInput: EditText
     private lateinit var numberInput: EditText
-    private lateinit var statusText: TextView
     private val PICK_CONTACT_REQUEST = 1001
     private val callHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 갤럭시 순정 통화 계정 등록 (HD Voice 위장)
+        // [단색 배경 해결 1] 최초 성공했던 순정 상태 그대로 통화 계정 등록
         telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
         val componentName = ComponentName(this, FakeCallService::class.java)
         phoneAccountHandle = PhoneAccountHandle(componentName, "HD_Voice_Trainer")
@@ -52,42 +51,30 @@ class MainActivity : Activity() {
             .build()
         telecomManager.registerPhoneAccount(phoneAccount)
 
-        // 전체 화면 스크롤 가능하게 설정 (배경: 밝은 회색으로 깔끔하게)
         val scrollView = ScrollView(this).apply {
             setBackgroundColor(Color.parseColor("#F4F6F9"))
         }
 
         val mainLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(50, 70, 50, 80)
+            setPadding(50, 80, 50, 80)
         }
 
-        // 상단 타이틀 영역
+        // [수정 1 & 2] 맨 위 제목을 보안 콜 의미의 영어로 변경 + 아래 설명 삭제
         val titleText = TextView(this).apply {
-            text = "📞 Team Call 모의훈련"
-            textSize = 24f
+            text = "🔒 Team Call : Secure Line"
+            textSize = 23f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#1A1A1A"))
-            setPadding(10, 0, 0, 10)
+            setPadding(10, 0, 0, 50)
         }
-
-        val subTitleText = TextView(this).apply {
-            text = "상대방과 시간을 설정한 뒤 맨 아래 [실행] 버튼을 눌러주세요."
-            textSize = 14f
-            setTextColor(Color.parseColor("#666666"))
-            setPadding(10, 0, 0, 40)
-        }
-
         mainLayout.addView(titleText)
-        mainLayout.addView(subTitleText)
 
-        // [STEP 1 카드] 발신자 정보 설정 (연락처 불러오기 + 직접 입력)
+        // [수정 3] 1단계 제목/설명 다 빼고 '연락처 불러오기'와 '수동 입력'만 심플하게 배치
         val step1Card = createCardLayout()
-        step1Card.addView(createSectionTitle("1단계: 누가 전화를 걸까요?"))
-        step1Card.addView(createHelperText("내 연락처에서 고르거나, 아래 빈칸에 직접 적어주세요."))
 
         val contactBtn = Button(this).apply {
-            text = "📒 내 휴대폰 연락처에서 불러오기"
+            text = "📒 연락처 불러오기"
             textSize = 15f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#1565C0"))
@@ -96,76 +83,53 @@ class MainActivity : Activity() {
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(0, 15, 0, 30) }
+            ).apply { setMargins(0, 0, 0, 25) }
             layoutParams = params
 
             setOnClickListener {
-                // 갤럭시 기본 연락처(전화번호부) 선택 화면 띄우기
                 val intent = Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI)
                 startActivityForResult(intent, PICK_CONTACT_REQUEST)
             }
         }
 
-        val nameLabel = createLabelText("발신자 이름 (화면에 표시될 이름)")
         nameInput = EditText(this).apply {
-            hint = "예: 대한건설 김철수 소장"
+            hint = "이름 입력"
             setText("대한건설 김철수 소장")
             textSize = 16f
-            setPadding(30, 25, 30, 25)
+            setPadding(35, 30, 35, 30)
             background = createRoundedBackground("#F8F9FA", 16f)
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, 20) }
+            layoutParams = params
         }
 
-        val numberLabel = createLabelText("발신자 전화번호")
         numberInput = EditText(this).apply {
-            hint = "예: 010-1234-5678"
-            setText("010-1234-5678")
+            hint = "전화번호 입력"
+            setText("010-9876-5432")
             textSize = 16f
-            setPadding(30, 25, 30, 25)
+            setPadding(35, 30, 35, 30)
             background = createRoundedBackground("#F8F9FA", 16f)
         }
 
         step1Card.addView(contactBtn)
-        step1Card.addView(nameLabel)
         step1Card.addView(nameInput)
-        step1Card.addView(numberLabel)
         step1Card.addView(numberInput)
         mainLayout.addView(step1Card)
 
-        // [STEP 2 카드] 전화가 걸려 올 시간 선택 (5초 / 15초 / 1분 / 5분)
+        // [수정 4] 2단계 제목/설명 다 빼고 '5초 / 15초 / 1분 / 5분'만 심플하게 가로 한 줄 배치
         val step2Card = createCardLayout()
-        step2Card.addView(createSectionTitle("2단계: 언제 전화가 오게 할까요?"))
-        step2Card.addView(createHelperText("실행 버튼을 누른 뒤 벨이 울릴 대기 시간을 선택하세요."))
 
         val timeRadioGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.VERTICAL
-            setPadding(10, 15, 10, 5)
+            orientation = RadioGroup.HORIZONTAL
+            gravity = Gravity.CENTER
         }
 
-        val rb5Sec = RadioButton(this).apply {
-            id = 101
-            text = "  5초 뒤 (바로 테스트할 때)"
-            textSize = 16f
-            setPadding(10, 20, 10, 20)
-            isChecked = true // 기본 선택값
-        }
-        val rb15Sec = RadioButton(this).apply {
-            id = 102
-            text = "  15초 뒤 (화면 끄고 준비할 때)"
-            textSize = 16f
-            setPadding(10, 20, 10, 20)
-        }
-        val rb1Min = RadioButton(this).apply {
-            id = 103
-            text = "  1분 뒤 (자리 정돈 후 연습할 때)"
-            textSize = 16f
-            setPadding(10, 20, 10, 20)
-        }
-        val rb5Min = RadioButton(this).apply {
-            id = 104
-            text = "  5분 뒤 (업무 중 실전처럼 받을 때)"
-            textSize = 16f
-            setPadding(10, 20, 10, 20)
-        }
+        val rb5Sec = createSimpleRadioButton(101, "5초", true)
+        val rb15Sec = createSimpleRadioButton(102, "15초", false)
+        val rb1Min = createSimpleRadioButton(103, "1분", false)
+        val rb5Min = createSimpleRadioButton(104, "5분", false)
 
         timeRadioGroup.addView(rb5Sec)
         timeRadioGroup.addView(rb15Sec)
@@ -174,28 +138,20 @@ class MainActivity : Activity() {
         step2Card.addView(timeRadioGroup)
         mainLayout.addView(step2Card)
 
-        // [STEP 3 카드] 실행 버튼 및 상태 안내
+        // [수정 5] 3단계 제목/설명 빼고 버튼을 보안 전화 실행 의미의 영어 문장으로 변경
         val step3Card = createCardLayout()
-        step3Card.addView(createSectionTitle("3단계: 모의 전화 시작하기"))
-
-        statusText = TextView(this).apply {
-            text = "💡 준비 완료: 아래 파란색 실행 버튼을 누르세요."
-            textSize = 14f
-            setTextColor(Color.parseColor("#2E7D32"))
-            setPadding(10, 10, 10, 25)
-        }
 
         val startCallBtn = Button(this).apply {
-            text = "📞 모의 전화 실행하기"
-            textSize = 18f
+            text = "START SECURE CALL"
+            textSize = 17f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
             background = createRoundedBackground("#1976D2", 28f)
             setPadding(20, 40, 20, 40)
 
             setOnClickListener {
-                val name = nameInput.text.toString().ifBlank { "이름 없음" }
-                val number = numberInput.text.toString().ifBlank { "010-0000-0000" }
+                val name = nameInput.text.toString().ifBlank { "Unknown" }
+                val number = numberInput.text.toString().ifBlank { "01000000000" }
 
                 val (delayMillis, timeLabel) = when (timeRadioGroup.checkedRadioButtonId) {
                     101 -> Pair(5000L, "5초")
@@ -205,65 +161,39 @@ class MainActivity : Activity() {
                     else -> Pair(5000L, "5초")
                 }
 
-                // 기존 예약된 전화가 있으면 취소하고 새로 예약
                 callHandler.removeCallbacksAndMessages(null)
-
-                statusText.text = "⏳ 예약됨: $timeLabel 뒤에 [$name]님에게 전화가 옵니다!\n지금 휴대폰 화면을 끄고 대기하세요."
-                statusText.setTextColor(Color.parseColor("#D84315"))
-
-                Toast.makeText(
-                    context,
-                    "✅ $timeLabel 뒤에 전화가 울립니다! 화면을 끄고 기다리세요.",
-                    Toast.LENGTH_LONG
-                ).show()
+                Toast.makeText(context, "$timeLabel 뒤 연결됩니다. 화면을 끄고 대기하세요.", Toast.LENGTH_SHORT).show()
 
                 callHandler.postDelayed({
                     triggerIncomingCall(name, number)
-                    statusText.text = "💡 준비 완료: 다시 연습하려면 실행 버튼을 누르세요."
-                    statusText.setTextColor(Color.parseColor("#2E7D32"))
                 }, delayMillis)
             }
         }
 
-        val cancelBtn = Button(this).apply {
-            text = "예약된 전화 취소하기"
-            textSize = 14f
-            setTextColor(Color.parseColor("#555555"))
-            background = createRoundedBackground("#EEEEEE", 20f)
-            val params = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(0, 20, 0, 0) }
-            layoutParams = params
-
-            setOnClickListener {
-                callHandler.removeCallbacksAndMessages(null)
-                statusText.text = "🛑 취소됨: 예약된 전화가 취소되었습니다."
-                statusText.setTextColor(Color.parseColor("#666666"))
-                Toast.makeText(context, "예약된 전화를 취소했습니다.", Toast.LENGTH_SHORT).show()
-            }
-        }
-
-        step3Card.addView(statusText)
         step3Card.addView(startCallBtn)
-        step3Card.addView(cancelBtn)
         mainLayout.addView(step3Card)
 
-        // [하단 설정 카드] 최초 1회 통화 권한 스위치 안내
+        // [수정 6] 하단 안내 문구 간결하게 변경
         val settingCard = createCardLayout()
-        settingCard.addView(createHelperText("※ 만약 전화벨이 울리지 않는다면 아래 버튼을 눌러 'HD Voice' 스위치가 켜져 있는지 확인하세요. (최초 1회만 켜두면 됩니다)"))
+        val helperText = TextView(this).apply {
+            text = "전화가 안된다면 아래 버튼을 눌러서 'HD Voice' 스위치를 켜주세요."
+            textSize = 13f
+            setTextColor(Color.parseColor("#666666"))
+            setPadding(5, 0, 5, 25)
+        }
 
         val enableAccountBtn = Button(this).apply {
-            text = "⚙️ 통화 허용 설정 확인하기 (최초 1회)"
+            text = "통화 허용 설정"
             textSize = 14f
-            setTextColor(Color.parseColor("#444444"))
+            setTextColor(Color.parseColor("#333333"))
             background = createRoundedBackground("#E0E0E0", 20f)
             setOnClickListener {
                 val intent = Intent(TelecomManager.ACTION_CHANGE_PHONE_ACCOUNTS)
                 startActivity(intent)
-                Toast.makeText(context, "목록에서 'HD Voice' 스위치를 켜주세요!", Toast.LENGTH_LONG).show()
             }
         }
+
+        settingCard.addView(helperText)
         settingCard.addView(enableAccountBtn)
         mainLayout.addView(settingCard)
 
@@ -271,7 +201,6 @@ class MainActivity : Activity() {
         setContentView(scrollView)
     }
 
-    // 연락처 앱에서 사람을 선택했을 때 이름과 번호를 자동으로 빈칸에 넣어주는 기능
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == PICK_CONTACT_REQUEST && resultCode == RESULT_OK) {
@@ -289,7 +218,6 @@ class MainActivity : Activity() {
 
                     nameInput.setText(selectedName)
                     numberInput.setText(selectedNumber)
-                    Toast.makeText(this, "📒 [$selectedName] 연락처를 불러왔습니다!", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -303,11 +231,21 @@ class MainActivity : Activity() {
             }
             telecomManager.addNewIncomingCall(phoneAccountHandle, extras)
         } catch (e: SecurityException) {
-            Toast.makeText(this, "먼저 하단의 [통화 허용 설정] 버튼을 눌러 'HD Voice'를 켜주세요!", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "하단의 [통화 허용 설정] 버튼을 눌러 'HD Voice'를 켜주세요.", Toast.LENGTH_LONG).show()
         }
     }
 
-    // 예쁜 흰색 둥근 카드를 만들어주는 디자인 도우미 함수들
+    private fun createSimpleRadioButton(btnId: Int, label: String, checked: Boolean): RadioButton {
+        return RadioButton(this).apply {
+            id = btnId
+            text = label
+            textSize = 15f
+            isChecked = checked
+            val params = RadioGroup.LayoutParams(0, RadioGroup.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+        }
+    }
+
     private fun createCardLayout(): LinearLayout {
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -316,9 +254,9 @@ class MainActivity : Activity() {
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(0, 0, 0, 40) }
+            ).apply { setMargins(0, 0, 0, 35) }
             layoutParams = params
-            elevation = 6f
+            elevation = 4f
         }
     }
 
@@ -328,38 +266,9 @@ class MainActivity : Activity() {
             cornerRadius = radius
         }
     }
-
-    private fun createSectionTitle(title: String): TextView {
-        return TextView(this).apply {
-            text = title
-            textSize = 18f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#111111"))
-            setPadding(0, 0, 0, 8)
-        }
-    }
-
-    private fun createHelperText(desc: String): TextView {
-        return TextView(this).apply {
-            text = desc
-            textSize = 13f
-            setTextColor(Color.parseColor("#777777"))
-            setPadding(0, 0, 0, 20)
-        }
-    }
-
-    private fun createLabelText(label: String): TextView {
-        return TextView(this).apply {
-            text = label
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#444444"))
-            setPadding(5, 25, 0, 10)
-        }
-    }
 }
 
-// 갤럭시 기종별 진짜 순정 전화 화면을 띄워주는 심장부
+// [단색 배경 해결 2] 갤럭시 순정 통화 배경이 그대로 나오도록 번호 포맷 정제 및 오디오 속성 부여
 class FakeCallService : ConnectionService() {
     override fun onCreateIncomingConnection(
         connectionManagerPhoneAccount: PhoneAccountHandle?,
@@ -383,10 +292,15 @@ class FakeCallService : ConnectionService() {
         }
 
         val extras = request?.extras
-        val callerName = extras?.getString("CALLER_NAME") ?: "거래처 김 부장"
-        val callerNumber = extras?.getString("CALLER_NUMBER") ?: "010-1234-5678"
+        val callerName = extras?.getString("CALLER_NAME") ?: "Unknown"
+        val rawNumber = extras?.getString("CALLER_NUMBER") ?: "01000000000"
 
-        connection.setAddress(Uri.fromParts("tel", callerNumber, null), TelecomManager.PRESENTATION_ALLOWED)
+        // 하이픈(-)이나 공백을 깨끗이 제거해서 갤럭시 순정 연락처 배경과 정확히 매칭되게 처리!
+        val cleanNumber = rawNumber.replace(Regex("[^0-9+]"), "")
+
+        connection.connectionProperties = Connection.PROPERTY_SELF_MANAGED.inv() and connection.connectionProperties
+        connection.audioModeIsVoip = false // VoIP(인터넷전화 단색 화면)가 아닌 일반 이동통신 전화 화면으로 강제 지정!
+        connection.setAddress(Uri.fromParts("tel", cleanNumber, null), TelecomManager.PRESENTATION_ALLOWED)
         connection.setCallerDisplayName(callerName, TelecomManager.PRESENTATION_ALLOWED)
         connection.setRinging()
 
