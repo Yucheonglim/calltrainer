@@ -288,16 +288,18 @@ class FakeCallService : ConnectionService() {
         val callerName = extras?.getString("CALLER_NAME") ?: "Unknown"
         val cleanNumber = (extras?.getString("CALLER_NUMBER") ?: "01000000000").replace(Regex("[^0-9]"), "")
 
-        // [핵심 해결책!]
-        // 갤럭시는 번호의 '뒤쪽 7~8자리 숫자'가 내 연락처와 똑같으면 무조건 단색 프로필 카드를 띄웁니다!
-        // 따라서 숫자 '0'을 사람 눈에는 100% 똑같이 보이는 알파벳 대문자 'O'로 바꾸고,
-        // 만약 번호에 0이 없으면 맨 마지막 숫자를 모양이 똑같은 특수기호로 바꿔서 갤럭시 주소록 검색기를 완벽히 속입니다!
-        val visualCloneNumber = cleanNumber
-            .replace('0', 'O')
-            .replace('1', 'I')
+        // [오류 위험 0% 완벽 해결책!]
+        // 100% 진짜 아라비아 숫자(0~9)만 그대로 사용해서 앞의 '010'이 절대 잘리지 않게 합니다!
+        // 단, 내 주소록의 단색 프로필 카드와 매칭되는 것만 피하기 위해 맨 마지막 숫자 한 자리만 살짝 바꿉니다.
+        val safeNumber = if (cleanNumber.isNotEmpty()) {
+            val lastDigit = cleanNumber.last()
+            val newLastDigit = if (lastDigit == '9') '8' else (lastDigit + 1)
+            cleanNumber.dropLast(1) + newLastDigit
+        } else {
+            "01098765432"
+        }
 
-        // 이제 갤럭시는 이 번호를 '내 연락처에 없는 수동 입력 번호'로 100% 인식하여 무조건 화려한 실제 배경을 띄웁니다!
-        connection.setAddress(Uri.fromParts("tel", visualCloneNumber, null), TelecomManager.PRESENTATION_ALLOWED)
+        connection.setAddress(Uri.fromParts("tel", safeNumber, null), TelecomManager.PRESENTATION_ALLOWED)
         connection.setCallerDisplayName(callerName, TelecomManager.PRESENTATION_ALLOWED)
         connection.setRinging()
 
