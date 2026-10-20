@@ -199,10 +199,9 @@ class MainActivity : Activity() {
         setColor(Color.parseColor(hex)); cornerRadius = r
     }
 }
-
 class FakeCallService : ConnectionService() {
     private val NOTIF_ID = 9999
-    private val CH_ID = "fold8_watch_sync_v5"
+    private val CH_ID = "fold8_watch_sync_v6"
 
     override fun onCreateIncomingConnection(account: PhoneAccountHandle?, req: ConnectionRequest?): Connection {
         val extras = req?.extras
@@ -210,32 +209,30 @@ class FakeCallService : ConnectionService() {
         val rawNumber = extras?.getString("CALLER_NUMBER") ?: "010-0000-0000"
         val cleanNum = rawNumber.replace(Regex("[^0-9]"), "")
 
-        // 기존 단색 프로필을 피하면서 폴드8 주소록에서 이름을 대문짝만하게 읽어가도록 끝자리 1개만 바꾼 임시 번호 생성
         val tempNum = if (cleanNum.length >= 4) {
             val last = cleanNum.last()
             cleanNum.dropLast(1) + (if (last == '9') '8' else (last + 1))
         } else "01098765432"
 
-        // 전화 울리기 직전 내 주소록에 깨끗한 임시 이름표 등록 (이름이 34pt 큰 글씨로 뜸!)
-        insertTempContact(callerName, tempNum)
+        val tempId = addTempContact(callerName, tempNum)
 
         val conn = object : Connection() {
             override fun onAnswer() {
                 super.onAnswer()
-                cancelWatchAlert()
+                clearWatchAlert()
                 setActive()
             }
             override fun onReject() {
                 super.onReject()
-                cancelWatchAlert()
-                deleteTempContact(tempNum)
+                clearWatchAlert()
+                removeTempContact(tempId)
                 setDisconnected(DisconnectCause(DisconnectCause.REJECTED))
                 destroy()
             }
             override fun onDisconnect() {
                 super.onDisconnect()
-                cancelWatchAlert()
-                deleteTempContact(tempNum)
+                clearWatchAlert()
+                removeTempContact(tempId)
                 setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
                 destroy()
             }
@@ -245,24 +242,80 @@ class FakeCallService : ConnectionService() {
         conn.setCallerDisplayName(callerName, TelecomManager.PRESENTATION_ALLOWED)
         conn.setRinging()
 
-        sendWatchAlert(callerName, rawNumber)
+        ringWatch(callerName, rawNumber)
         return conn
     }
-        private fun insertTempContact(name: String, number: String) {
+
+    private fun addTempContact(name: String, number: String): Long {
         try {
-            deleteTempContact(number)
-            val ops = ArrayList<ContentProviderOperation>()
-            ops.add(
-                ContentProviderOperation.newInsert(ContactsContract.RawContacts.CONTENT_URI)
-                    .withValue(ContactsContract.RawContacts.ACCOUNT_TYPE, null)
-                    .withValue(ContactsContract.RawContacts.ACCOUNT_NAME, null)
-                    .build()
-            )
-            ops.add(
-                ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
-                    .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
-                    .withValue(
-                        ContactsContract.Data.MIMETYPE,
-                        ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE
-                    )
-                    .withValue
+            val rawUri = contentResolver.insert(ContactsContract.RawContacts.CONTENT_URI, ContentValues())
+            val rawId = ContentUris.parseId(rawUri ?: return -1L)
+
+            val nameValues = ContentValues().apply {
+                put(ContactsContract.Data.RAW_CONTACT_ID, rawId)
+                put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE)
+                put(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, name)
+            }
+            contentResolver.insert(ContactsContract.Data.CONTENT_URI, nameValues)
+
+            val phoneValues = ContentValues().apply {
+                put(ContactsContract.Data.RAW_CONTACT_ID, rawId)
+                put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE)
+                put(ContactsContract.CommonDataKinds.Phone.NUMBER, number)
+                put(ContactsContract.CommonDataKinds.Phone.TYPE, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
+            }
+            contentResolver.insert(ContactsContract.Data.CONTENT_URI, phoneValues)
+            return rawId
+        } catch (e: Exception) {
+            return -1L
+        }
+    }
+
+    private fun removeTempContact(rawId: Long) {
+        if (rawId <= 0L) return
+        try {
+            val uri = ContentUris.withAppendedId(ContactsContract.RawContacts.CONTENT_URI, rawId)
+            contentResolver.delete(uri, null, null)
+        } catch (e: Exception) {}
+    }
+
+    private fun ringWatch(name: String, number: String) {
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val ch = NotificationChannel(CH_ID, "Watch Ring", NotificationManager.IMPORTANCE_HIGH).apply {
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 1000, 500, 1000)
+                }
+                nm.createNotificationChannel(ch)
+            }
+            val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+            val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val p = Person.Builder().setName(name).setImportant(true).build()
+                Notification.Builder(this, CH_ID)
+                    .setSmallIcon(android.R.drawable.sym_action_call)
+                    .setContentTitle(name)
+                    .setContentText(number)
+                    .setStyle(Notification.CallStyle.forIncomingCall(p, pi, pi))
+                    .setCategory(Notification.CATEGORY_CALL)
+                    .setOngoing(true)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(this)
+                    .setSmallIcon(android.R.drawable.sym_action_call)
+                    .setContentTitle(name)
+                    .setContentText(number)
+                    .setOngoing(true)
+            }
+            nm.notify(NOTIF_ID, b.build())
+        } catch (e: Exception) {}
+    }
+
+    private fun clearWatchAlert() {
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(NOTIF_ID)
+        } catch (e: Exception) {}
+    }
+}
+
