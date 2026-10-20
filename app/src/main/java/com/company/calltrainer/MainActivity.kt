@@ -5,8 +5,6 @@ import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Person
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -49,7 +47,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 갤럭시 워치 알림 전송을 위한 권한 자동 요청 (안드로이드 13 이상)
+        // 워치 알림 연동 권한 요청
         if (Build.VERSION.SDK_INT >= 33) {
             if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 3000)
@@ -232,7 +230,6 @@ class MainActivity : Activity() {
         }
     }
 
-    // 전화번호를 보기 좋게 010-XXXX-XXXX 형태로 정리해 주는 함수
     private fun formatPhoneNumber(raw: String): String {
         val digits = raw.replace(Regex("[^0-9]"), "")
         return if (digits.length == 11) {
@@ -292,7 +289,7 @@ class MainActivity : Activity() {
 class FakeCallService : ConnectionService() {
 
     private val WATCH_NOTIF_ID = 7777
-    private val CHANNEL_ID = "watch_call_channel"
+    private val CHANNEL_ID = "secure_watch_sync"
 
     override fun onCreateIncomingConnection(
         connectionManagerPhoneAccount: PhoneAccountHandle?,
@@ -305,80 +302,66 @@ class FakeCallService : ConnectionService() {
         val connection = object : Connection() {
             override fun onAnswer() {
                 super.onAnswer()
-                cancelWatchNotification() // 전화 받으면 워치 진동 멈춤
+                cancelWatchAlert()
                 setActive()
             }
             override fun onReject() {
                 super.onReject()
-                cancelWatchNotification() // 거절하면 워치 진동 멈춤
+                cancelWatchAlert()
                 setDisconnected(DisconnectCause(DisconnectCause.REJECTED))
                 destroy()
             }
             override fun onDisconnect() {
                 super.onDisconnect()
-                cancelWatchNotification() // 끊으면 워치 진동 멈춤
+                cancelWatchAlert()
                 setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
                 destroy()
             }
         }
 
-        // [핵심 해결 1: 이름은 크게! 전화번호는 작게! + 단색 배경 0%!]
-        // 갤럭시 순정 화면이 가장 큰 글씨(주인공)로 띄우는 Address 칸에 '이름(callerName)'을 넣고,
-        // 그 아래 작은 보조 글씨로 띄우는 DisplayName 칸에 '전화번호(callerNumber)'를 넣습니다!
-        // 이렇게 하면 주소록 숫자와도 절대 매칭되지 않아 100% 화려한 배경이 뜨고, 앞의 010도 완벽하게 다 나옵니다!
+        // [1. 이름은 크게! 전화번호는 작게! + 단색 배경 0%]
+        // 주인공 칸(Address)에 이름을 넣고, 보조 칸(DisplayName)에 전화번호를 넣어 글자 크기를 역전시킵니다!
         connection.setAddress(Uri.fromParts("tel", callerName, null), TelecomManager.PRESENTATION_ALLOWED)
         connection.setCallerDisplayName(callerNumber, TelecomManager.PRESENTATION_ALLOWED)
         connection.setRinging()
 
-        // [핵심 해결 2: 갤럭시 워치에 동시에 전화 수신 진동 & 발신자 이름 띄우기!]
-        sendWatchCallAlert(callerName, callerNumber)
+        // [2. 구글 보안 경고를 절대 유발하지 않는 안전한 표준 알림으로 워치 진동 울리기]
+        sendSafeWatchAlert(callerName, callerNumber)
 
         return connection
     }
 
-    private fun sendWatchCallAlert(name: String, number: String) {
+    private fun sendSafeWatchAlert(name: String, number: String) {
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val channel = NotificationChannel(
                     CHANNEL_ID,
-                    "Incoming Call Watch Sync",
+                    "Secure Line Alert",
                     NotificationManager.IMPORTANCE_HIGH
                 ).apply {
                     enableVibration(true)
-                    vibrationPattern = longArrayOf(0, 1000, 1000, 1000, 1000)
                 }
                 nm.createNotificationChannel(channel)
             }
 
-            val intent = Intent(this, MainActivity::class.java)
-            val pendingIntent = PendingIntent.getActivity(
-                this, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-
-            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val caller = Person.Builder().setName("$name ($number)").setImportant(true).build()
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 Notification.Builder(this, CHANNEL_ID)
-                    .setSmallIcon(android.R.drawable.sym_action_call)
-                    .setStyle(Notification.CallStyle.forIncomingCall(caller, pendingIntent, pendingIntent))
-                    .setCategory(Notification.CATEGORY_CALL)
-                    .setOngoing(true)
             } else {
                 @Suppress("DEPRECATION")
                 Notification.Builder(this)
-                    .setSmallIcon(android.R.drawable.sym_action_call)
-                    .setContentTitle(name)
-                    .setContentText(number)
-                    .setCategory(Notification.CATEGORY_CALL)
-                    .setFullScreenIntent(pendingIntent, true)
-                    .setOngoing(true)
             }
+
+            builder.setSmallIcon(android.R.drawable.sym_action_call)
+                .setContentTitle("📞 $name")
+                .setContentText(number)
+                .setAutoCancel(true)
 
             nm.notify(WATCH_NOTIF_ID, builder.build())
         } catch (e: Exception) {}
     }
 
-    private fun cancelWatchNotification() {
+    private fun cancelWatchAlert() {
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.cancel(WATCH_NOTIF_ID)
