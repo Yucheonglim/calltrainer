@@ -199,9 +199,10 @@ class MainActivity : Activity() {
         setColor(Color.parseColor(hex)); cornerRadius = r
     }
 }
+
 class FakeCallService : ConnectionService() {
     private val NOTIF_ID = 9999
-    private val CH_ID = "fold8_watch_sync_v6"
+    private val CH_ID = "fold8_watch_sync_v7"
 
     override fun onCreateIncomingConnection(account: PhoneAccountHandle?, req: ConnectionRequest?): Connection {
         val extras = req?.extras
@@ -214,6 +215,7 @@ class FakeCallService : ConnectionService() {
             cleanNum.dropLast(1) + (if (last == '9') '8' else (last + 1))
         } else "01098765432"
 
+        // 큰 글씨 이름만 주소록으로 띄우기 위해 임시 연락처 등록
         val tempId = addTempContact(callerName, tempNum)
 
         val conn = object : Connection() {
@@ -238,11 +240,13 @@ class FakeCallService : ConnectionService() {
             }
         }
 
+        // [핵심 수정 1] 전화번호 밑에 작은 글씨로 이름이 한 번 더 중복 출력되던 setCallerDisplayName을 제거!
+        // 이제 큰 이름 1개 + 전화번호 1개만 깔끔하게 나옵니다!
         conn.setAddress(Uri.fromParts("tel", tempNum, null), TelecomManager.PRESENTATION_ALLOWED)
-        conn.setCallerDisplayName(callerName, TelecomManager.PRESENTATION_ALLOWED)
         conn.setRinging()
 
-        ringWatch(callerName, rawNumber)
+        // [핵심 수정 2] 워치에는 전화번호 없이 오직 '연락처 이름'만 깔끔하게 전송!
+        ringWatch(callerName)
         return conn
     }
 
@@ -279,34 +283,29 @@ class FakeCallService : ConnectionService() {
         } catch (e: Exception) {}
     }
 
-    private fun ringWatch(name: String, number: String) {
+    private fun ringWatch(name: String) {
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val ch = NotificationChannel(CH_ID, "Watch Ring", NotificationManager.IMPORTANCE_HIGH).apply {
+                val ch = NotificationChannel(CH_ID, "수신전화", NotificationManager.IMPORTANCE_HIGH).apply {
                     enableVibration(true)
                     vibrationPattern = longArrayOf(0, 1000, 500, 1000)
                 }
                 nm.createNotificationChannel(ch)
             }
-            val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-            val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val p = Person.Builder().setName(name).setImportant(true).build()
+            val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 Notification.Builder(this, CH_ID)
-                    .setSmallIcon(android.R.drawable.sym_action_call)
-                    .setContentTitle(name)
-                    .setContentText(number)
-                    .setStyle(Notification.CallStyle.forIncomingCall(p, pi, pi))
-                    .setCategory(Notification.CATEGORY_CALL)
-                    .setOngoing(true)
             } else {
                 @Suppress("DEPRECATION")
                 Notification.Builder(this)
-                    .setSmallIcon(android.R.drawable.sym_action_call)
-                    .setContentTitle(name)
-                    .setContentText(number)
-                    .setOngoing(true)
             }
+            // 워치 화면에는 전화번호나 Team Call 없이 오직 '연락처 이름'만 출력!
+            b.setSmallIcon(android.R.drawable.sym_action_call)
+                .setContentTitle(name)
+                .setContentText("수신전화")
+                .setCategory(Notification.CATEGORY_CALL)
+                .setOngoing(true)
+
             nm.notify(NOTIF_ID, b.build())
         } catch (e: Exception) {}
     }
@@ -318,4 +317,3 @@ class FakeCallService : ConnectionService() {
         } catch (e: Exception) {}
     }
 }
-
