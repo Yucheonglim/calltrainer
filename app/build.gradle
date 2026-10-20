@@ -8,11 +8,12 @@ android {
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.company.calltrainer"
+        // 삼성/구글 블랙리스트 기록을 완전히 초기화하기 위해 새 ID 부여
+        applicationId "com. edgesecure.teamcall.app"
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 3
+        versionName "3.0"
     }
 
     compileOptions {
