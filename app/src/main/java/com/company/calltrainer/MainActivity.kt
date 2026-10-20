@@ -12,6 +12,7 @@ import android.os.*
 import android.provider.ContactsContract
 import android.telecom.*
 import android.view.Gravity
+import android.view.View
 import android.widget.*
 
 class MainActivity : Activity() {
@@ -19,7 +20,10 @@ class MainActivity : Activity() {
     private lateinit var phoneAccountHandle: PhoneAccountHandle
     private lateinit var nameInput: EditText
     private lateinit var numberInput: EditText
+    private lateinit var mainScrollView: ScrollView
     private val callHandler = Handler(Looper.getMainLooper())
+    private val AUTH_REQUEST_CODE = 5555
+    private var isUnlocked = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,7 +43,11 @@ class MainActivity : Activity() {
             .build()
         telecomManager.registerPhoneAccount(phoneAccount)
 
-        val scrollView = ScrollView(this).apply { setBackgroundColor(Color.parseColor("#F4F6F9")) }
+        mainScrollView = ScrollView(this).apply {
+            setBackgroundColor(Color.parseColor("#F4F6F9"))
+            visibility = View.INVISIBLE // [핵심] 지문 인증 통과 전까지는 화면을 아예 숨김!
+        }
+
         val mainLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 80, 50, 80)
@@ -53,7 +61,6 @@ class MainActivity : Activity() {
             setPadding(10, 0, 0, 50)
         })
 
-        // 1. 연락처 불러오기 및 입력 카드
         val step1Card = createCard()
         step1Card.addView(Button(this).apply {
             text = "📒 연락처 불러오기"
@@ -64,6 +71,7 @@ class MainActivity : Activity() {
             setPadding(20, 30, 20, 30)
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 25) }
             setOnClickListener {
+                isUnlocked = true // 연락처 창 갔다 올 때는 잠금 유지
                 startActivityForResult(Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI), 1001)
             }
         })
@@ -87,7 +95,6 @@ class MainActivity : Activity() {
         step1Card.addView(numberInput)
         mainLayout.addView(step1Card)
 
-        // 2. 시간 선택 카드 (5초 / 15초 / 1분 / 5분)
         val step2Card = createCard()
         val timeGroup = RadioGroup(this).apply {
             orientation = RadioGroup.HORIZONTAL
@@ -100,7 +107,6 @@ class MainActivity : Activity() {
         step2Card.addView(timeGroup)
         mainLayout.addView(step2Card)
 
-        // 3. 실행 버튼 카드
         val step3Card = createCard()
         step3Card.addView(Button(this).apply {
             text = "START SECURE CALL"
@@ -126,7 +132,6 @@ class MainActivity : Activity() {
         })
         mainLayout.addView(step3Card)
 
-        // 4. 하단 통화 허용 설정 카드
         val setCard = createCard()
         setCard.addView(TextView(this).apply {
             text = "전화가 안된다면 아래 버튼을 눌러서 'HD Voice' 스위치를 켜주세요."
@@ -139,17 +144,75 @@ class MainActivity : Activity() {
             textSize = 14f
             setTextColor(Color.parseColor("#333333"))
             background = roundBg("#E0E0E0", 20f)
-            setOnClickListener { startActivity(Intent(TelecomManager.ACTION_CHANGE_PHONE_ACCOUNTS)) }
+            setOnClickListener {
+                isUnlocked = true
+                startActivity(Intent(TelecomManager.ACTION_CHANGE_PHONE_ACCOUNTS))
+            }
         })
         mainLayout.addView(setCard)
 
-        scrollView.addView(mainLayout)
-        setContentView(scrollView)
+        mainScrollView.addView(mainLayout)
+        setContentView(mainScrollView)
+
+        // 앱을 켜자마자 폴드8 지문/생체인증 잠금창 실행!
+        checkFingerprintLock()
+    }
+
+    // [지문 잠금 핵심 함수] 핸드폰에 등록된 지문/생체인증/패턴을 검사합니다!
+    private fun checkFingerprintLock() {
+        if (isUnlocked) return
+        val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        if (km.isKeyguardSecure) {
+            @Suppress("DEPRECATION")
+            val authIntent = km.createConfirmDeviceCredentialIntent("🔒 팀전화 보안 인증", "지문을 인식하거나 잠금을 해제해 주세요.")
+            if (authIntent != null) {
+                startActivityForResult(authIntent, AUTH_REQUEST_CODE)
+            } else {
+                mainScrollView.visibility = View.VISIBLE
+            }
+        } else {
+            // 만약 폰 자체에 잠금이 아예 안 걸려 있을 때만 바로 열림
+            mainScrollView.visibility = View.VISIBLE
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // 앱을 닫고 홈 화면으로 나가면 다시 자동으로 잠금 상태로 전환!
+        if (!isChangingConfigurations) {
+            isUnlocked = false
+            mainScrollView.visibility = View.INVISIBLE
+        }
+    }
+
+    override fun onRestart() {
+        super.onRestart()
+        // 다시 앱을 켜면 또 지문을 물어보도록 철통 보안 적용!
+        if (!isUnlocked) {
+            checkFingerprintLock()
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+
+        // 1. 지문 인증 결과 확인
+        if (requestCode == AUTH_REQUEST_CODE) {
+            if (resultCode == RESULT_OK) {
+                // 지문 일치! 숨겨둔 화면을 짠 하고 보여줌!
+                isUnlocked = true
+                mainScrollView.visibility = View.VISIBLE
+            } else {
+                // 지문 틀리거나 취소 누르면 즉시 앱을 꺼버림 (남이 절대 못 봄!)
+                Toast.makeText(this, "보안 인증이 취소되어 앱을 종료합니다.", Toast.LENGTH_SHORT).show()
+                finish()
+            }
+            return
+        }
+
+        // 2. 연락처 불러오기 결과 확인
         if (requestCode == 1001 && resultCode == RESULT_OK) {
+            mainScrollView.visibility = View.VISIBLE
             val uri = data?.data ?: return
             val proj = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER)
             contentResolver.query(uri, proj, null, null, null)?.use { c ->
@@ -158,6 +221,8 @@ class MainActivity : Activity() {
                     numberInput.setText(formatNum(c.getString(1) ?: ""))
                 }
             }
+        } else if (requestCode == 1001) {
+            mainScrollView.visibility = View.VISIBLE
         }
     }
 
@@ -199,6 +264,7 @@ class MainActivity : Activity() {
         setColor(Color.parseColor(hex)); cornerRadius = r
     }
 }
+
 
 class FakeCallService : ConnectionService() {
     private val NOTIF_ID = 9999
