@@ -2,47 +2,47 @@ package com.company.calltrainer
 
 import android.Manifest
 import android.app.Activity
-import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Person
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
-import android.media.Ringtone
 import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.VibrationEffect
-import android.os.Vibrator
 import android.provider.ContactsContract
+import android.telecom.Connection
+import android.telecom.ConnectionRequest
+import android.telecom.ConnectionService
+import android.telecom.DisconnectCause
+import android.telecom.PhoneAccount
+import android.telecom.PhoneAccountHandle
+import android.telecom.TelecomManager
 import android.view.Gravity
-import android.view.MotionEvent
-import android.view.View
-import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
-import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
-import android.widget.RelativeLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import kotlin.math.hypot
 
 class MainActivity : Activity() {
 
+    private lateinit var telecomManager: TelecomManager
+    private lateinit var phoneAccountHandle: PhoneAccountHandle
     private lateinit var nameInput: EditText
     private lateinit var numberInput: EditText
     private val PICK_CONTACT_REQUEST = 1001
@@ -51,11 +51,22 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // 갤럭시 워치 알림 전송을 위한 권한 자동 요청
         if (Build.VERSION.SDK_INT >= 33) {
             if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 3000)
             }
         }
+
+        // 폴드8 울트라의 100% 진짜 최신 순정 전화 화면 등록
+        telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+        val componentName = ComponentName(this, FakeCallService::class.java)
+        phoneAccountHandle = PhoneAccountHandle(componentName, "HD_Voice_Trainer")
+
+        val phoneAccount = PhoneAccount.builder(phoneAccountHandle, "HD Voice")
+            .setCapabilities(PhoneAccount.CAPABILITY_CALL_PROVIDER)
+            .build()
+        telecomManager.registerPhoneAccount(phoneAccount)
 
         val scrollView = ScrollView(this).apply {
             setBackgroundColor(Color.parseColor("#F4F6F9"))
@@ -152,7 +163,7 @@ class MainActivity : Activity() {
 
             setOnClickListener {
                 val name = nameInput.text.toString().ifBlank { "Unknown" }
-                val number = formatPhoneNumber(numberInput.text.toString().ifBlank { "010-0000-0000" })
+                val number = numberInput.text.toString().ifBlank { "010-0000-0000" }
 
                 val (delayMillis, timeLabel) = when (timeRadioGroup.checkedRadioButtonId) {
                     101 -> Pair(5000L, "5초")
@@ -163,21 +174,40 @@ class MainActivity : Activity() {
                 }
 
                 callHandler.removeCallbacksAndMessages(null)
-                Toast.makeText(context, "$timeLabel 뒤 연결됩니다.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "$timeLabel 뒤 연결됩니다. 화면을 끄고 대기하세요.", Toast.LENGTH_SHORT).show()
 
                 callHandler.postDelayed({
-                    val intent = Intent(this@MainActivity, GalaxyCallScreenActivity::class.java).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                        putExtra("CALLER_NAME", name)
-                        putExtra("CALLER_NUMBER", number)
-                    }
-                    startActivity(intent)
+                    triggerIncomingCall(name, number)
                 }, delayMillis)
             }
         }
 
         step3Card.addView(startCallBtn)
         mainLayout.addView(step3Card)
+
+        // 5. 하단 통화 허용 설정 안내 (폴드8 진짜 순정 화면을 켜기 위한 스위치)
+        val settingCard = createCardLayout()
+        val helperText = TextView(this).apply {
+            text = "전화가 안된다면 아래 버튼을 눌러서 'HD Voice' 스위치를 켜주세요."
+            textSize = 13f
+            setTextColor(Color.parseColor("#666666"))
+            setPadding(5, 0, 5, 25)
+        }
+
+        val enableAccountBtn = Button(this).apply {
+            text = "통화 허용 설정"
+            textSize = 14f
+            setTextColor(Color.parseColor("#333333"))
+            background = createRoundedBackground("#E0E0E0", 20f)
+            setOnClickListener {
+                val intent = Intent(TelecomManager.ACTION_CHANGE_PHONE_ACCOUNTS)
+                startActivity(intent)
+            }
+        }
+
+        settingCard.addView(helperText)
+        settingCard.addView(enableAccountBtn)
+        mainLayout.addView(settingCard)
 
         scrollView.addView(mainLayout)
         setContentView(scrollView)
@@ -216,6 +246,18 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun triggerIncomingCall(name: String, number: String) {
+        try {
+            val extras = Bundle().apply {
+                putString("CALLER_NAME", name)
+                putString("CALLER_NUMBER", formatPhoneNumber(number))
+            }
+            telecomManager.addNewIncomingCall(phoneAccountHandle, extras)
+        } catch (e: SecurityException) {
+            Toast.makeText(this, "하단의 [통화 허용 설정] 버튼을 눌러 'HD Voice' 스위치를 켜주세요.", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun createSimpleRadioButton(btnId: Int, label: String, checked: Boolean): RadioButton {
         return RadioButton(this).apply {
             id = btnId
@@ -249,375 +291,107 @@ class MainActivity : Activity() {
     }
 }
 
-// 최신 갤럭시 폴드8 / One UI 7 순정 통화 화면을 정밀 복제한 화면 (보안 경고 0%, 워치 연동 100%)
-class GalaxyCallScreenActivity : Activity() {
+// 폴드8 울트라의 100% 진짜 최신 순정 전화 화면(이름 크게/번호 작게/화려한 배경) + 워치 동시 진동
+class FakeCallService : ConnectionService() {
 
-    private var ringtone: Ringtone? = null
-    private var vibrator: Vibrator? = null
-    private val timerHandler = Handler(Looper.getMainLooper())
-    private var seconds = 0
-    private lateinit var subStatusText: TextView
-    private lateinit var incomingBottomLayout: RelativeLayout
-    private lateinit var activeCallPanel: LinearLayout
-    private val WATCH_NOTIF_ID = 8888
-    private val CHANNEL_ID = "galaxy_watch_ring"
+    private val WATCH_NOTIF_ID = 9999
+    private val CHANNEL_ID = "fold8_watch_call_ring_v2"
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+    override fun onCreateIncomingConnection(
+        connectionManagerPhoneAccount: PhoneAccountHandle?,
+        request: ConnectionRequest?
+    ): Connection {
+        val extras = request?.extras
+        val callerName = extras?.getString("CALLER_NAME") ?: "Unknown"
+        val callerNumber = extras?.getString("CALLER_NUMBER") ?: "010-0000-0000"
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
-            val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
-            km.requestDismissKeyguard(this, null)
-        } else {
-            @Suppress("DEPRECATION")
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-            )
-        }
-
-        val callerName = intent.getStringExtra("CALLER_NAME") ?: "대한건설 김철수 소장"
-        val callerNumber = intent.getStringExtra("CALLER_NUMBER") ?: "010-9876-5432"
-
-        // 최신 갤럭시 One UI 순정 통화 배경 (깊고 세련된 삼성 순정 오로라 다크블루-틸 그라데이션)
-        val oneUiBackground = GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(
-                Color.parseColor("#0F2027"),
-                Color.parseColor("#203A43"),
-                Color.parseColor("#2C5364")
-            )
-        )
-
-        val root = RelativeLayout(this).apply {
-            background = oneUiBackground
-        }
-
-        // [상단 영역] 이름은 대문짝만하게 크게(34pt), 전화번호는 작게(17pt)!
-        val topInfoBox = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(40, 180, 40, 0)
-            val params = RelativeLayout.LayoutParams(
-                RelativeLayout.LayoutParams.MATCH_PARENT,
-                RelativeLayout.LayoutParams.WRAP_CONTENT
-            ).apply { addRule(RelativeLayout.ALIGN_PARENT_TOP) }
-            layoutParams = params
-        }
-
-        subStatusText = TextView(this).apply {
-            text = "수신 전화"
-            textSize = 15f
-            setTextColor(Color.parseColor("#B0BEC5"))
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 25)
-        }
-
-        // 1. 발신자 이름 (가장 크게!)
-        val bigNameText = TextView(this).apply {
-            text = callerName
-            textSize = 34f
-            setTypeface(Typeface.create("sans-serif-light", Typeface.BOLD))
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 16)
-        }
-
-        // 2. 전화번호 (그 아래 작고 깔끔하게!)
-        val smallNumberText = TextView(this).apply {
-            text = "휴대전화  $callerNumber"
-            textSize = 17f
-            setTextColor(Color.parseColor("#CFD8DC"))
-            gravity = Gravity.CENTER
-        }
-
-        topInfoBox.addView(subStatusText)
-        topInfoBox.addView(bigNameText)
-        topInfoBox.addView(smallNumberText)
-        root.addView(topInfoBox)
-
-        // [하단 수신 영역] 갤럭시 순정 스와이프(밀어서 받기) 수화기 원형 버튼
-        incomingBottomLayout = RelativeLayout(this).apply {
-            val params = RelativeLayout.LayoutParams(
-                RelativeLayout.LayoutParams.MATCH_PARENT,
-                550
-            ).apply {
-                addRule(RelativeLayout.ALIGN_PARENT_BOTTOM)
-                setMargins(80, 0, 80, 120)
+        val connection = object : Connection() {
+            override fun onAnswer() {
+                super.onAnswer()
+                cancelWatchNotification()
+                setActive()
             }
-            layoutParams = params
+            override fun onReject() {
+                super.onReject()
+                cancelWatchNotification()
+                setDisconnected(DisconnectCause(DisconnectCause.REJECTED))
+                destroy()
+            }
+            override fun onDisconnect() {
+                super.onDisconnect()
+                cancelWatchNotification()
+                setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
+                destroy()
+            }
         }
 
-        val guideHint = TextView(this).apply {
-            text = "아이콘을 바깥쪽으로 밀어 통화 또는 거절"
-            textSize = 13f
-            setTextColor(Color.parseColor("#90A4AE"))
-            gravity = Gravity.CENTER
-            val params = RelativeLayout.LayoutParams(
-                RelativeLayout.LayoutParams.MATCH_PARENT,
-                RelativeLayout.LayoutParams.WRAP_CONTENT
-            ).apply { addRule(RelativeLayout.ALIGN_PARENT_TOP) }
-            layoutParams = params
-        }
-        incomingBottomLayout.addView(guideHint)
+        // [1. 폴드8 최신 순정 화면에서 '이름'이 대문짝만하게 크게, '번호'가 작게 나오게 설정!]
+        connection.setAddress(Uri.fromParts("tel", callerName, null), TelecomManager.PRESENTATION_ALLOWED)
+        connection.setCallerDisplayName(callerNumber, TelecomManager.PRESENTATION_ALLOWED)
+        connection.setRinging()
 
-        // 왼쪽 아래: 초록색 순정 통화 스와이프 버튼
-        val answerSwipeBtn = createGalaxyCallButton(isAnswer = true) {
-            onCallAnswered()
-        }
-        val answerParams = RelativeLayout.LayoutParams(240, 240).apply {
-            addRule(RelativeLayout.ALIGN_PARENT_LEFT)
-            addRule(RelativeLayout.ALIGN_PARENT_BOTTOM)
-        }
-        incomingBottomLayout.addView(answerSwipeBtn, answerParams)
+        // [2. 갤럭시 워치로 즉시 전화 진동 쏘기!]
+        sendWatchCallAlert(callerName, callerNumber)
 
-        // 오른쪽 아래: 빨간색 순정 거절 스와이프 버튼
-        val rejectSwipeBtn = createGalaxyCallButton(isAnswer = false) {
-            endCallAndClose()
-        }
-        val rejectParams = RelativeLayout.LayoutParams(240, 240).apply {
-            addRule(RelativeLayout.ALIGN_PARENT_RIGHT)
-            addRule(RelativeLayout.ALIGN_PARENT_BOTTOM)
-        }
-        incomingBottomLayout.addView(rejectSwipeBtn, rejectParams)
-
-        root.addView(incomingBottomLayout)
-
-        // [통화 중 하단 메뉴 패널] 전화를 받으면 나타나는 갤럭시 순정 6버튼 + 빨간 종료 버튼
-        activeCallPanel = createActiveCallPanel()
-        activeCallPanel.visibility = View.GONE
-        root.addView(activeCallPanel)
-
-        setContentView(root)
-
-        startRingtoneAndVibration()
-        sendWatchAlert(callerName, callerNumber)
+        return connection
     }
 
-    // 손가락으로 밀어서(스와이프) 받거나 터치할 때 하얀 물결 원이 커지는 갤럭시 순정 버튼 구현
-    private fun createGalaxyCallButton(isAnswer: Boolean, onTrigger: () -> Unit): View {
-        return object : View(this) {
-            private var touchRadius = 0f
-            private var startX = 0f
-            private var startY = 0f
-            private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = if (isAnswer) Color.parseColor("#00C853") else Color.parseColor("#FF1744")
-                style = Paint.Style.FILL
-            }
-            private val ripplePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.parseColor("#40FFFFFF")
-                style = Paint.Style.STROKE
-                strokeWidth = 6f
-            }
-            private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.WHITE
-                textSize = 70f
-                textAlign = Paint.Align.CENTER
-            }
-
-            override fun onDraw(canvas: Canvas) {
-                super.onDraw(canvas)
-                val cx = width / 2f
-                val cy = height / 2f
-                if (touchRadius > 0f) {
-                    canvas.drawCircle(cx, cy, touchRadius.coerceAtMost(cx), ripplePaint)
-                }
-                canvas.drawCircle(cx, cy, 95f, bgPaint)
-                val symbol = if (isAnswer) "✆" else "✕"
-                val yOffset = (iconPaint.descent() + iconPaint.ascent()) / 2
-                canvas.drawText(symbol, cx, cy - yOffset, iconPaint)
-            }
-
-            override fun onTouchEvent(event: MotionEvent): Boolean {
-                when (event.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        startX = event.x
-                        startY = event.y
-                        touchRadius = 115f
-                        invalidate()
-                        return true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        val dist = hypot((event.x - startX).toDouble(), (event.y - startY).toDouble()).toFloat()
-                        touchRadius = 95f + dist
-                        invalidate()
-                        if (dist > 70f) {
-                            touchRadius = 0f
-                            onTrigger()
-                        }
-                        return true
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        touchRadius = 0f
-                        invalidate()
-                        onTrigger()
-                        return true
-                    }
-                }
-                return super.onTouchEvent(event)
-            }
-        }
-    }
-
-    // 전화를 받았을 때 실제 갤럭시 통화 화면처럼 바뀌는 하단 제어판 (녹음, 키패드, 스피커 등 표시)
-    private fun createActiveCallPanel(): LinearLayout {
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#33000000"))
-                cornerRadius = 60f
-            }
-            setPadding(50, 70, 50, 90)
-            val params = RelativeLayout.LayoutParams(
-                RelativeLayout.LayoutParams.MATCH_PARENT,
-                RelativeLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                addRule(RelativeLayout.ALIGN_PARENT_BOTTOM)
-                setMargins(40, 0, 40, 80)
-            }
-            layoutParams = params
-
-            val row1 = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-                setPadding(0, 0, 0, 50)
-                addView(createMenuItem("녹음"))
-                addView(createMenuItem("음소거"))
-                addView(createMenuItem("스피커"))
-            }
-            val row2 = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-                setPadding(0, 0, 0, 70)
-                addView(createMenuItem("블루투스"))
-                addView(createMenuItem("키패드"))
-                addView(createMenuItem("통화 추가"))
-            }
-
-            val endCallBtn = Button(context).apply {
-                text = "✕"
-                textSize = 26f
-                setTextColor(Color.WHITE)
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(Color.parseColor("#FF1744"))
-                }
-                layoutParams = LinearLayout.LayoutParams(200, 200)
-                setOnClickListener { endCallAndClose() }
-            }
-
-            addView(row1)
-            addView(row2)
-            addView(endCallBtn)
-        }
-    }
-
-    private fun createMenuItem(label: String): TextView {
-        return TextView(this).apply {
-            text = "●\n$label"
-            textSize = 13f
-            setTextColor(Color.parseColor("#E0E0E0"))
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-    }
-
-    private fun onCallAnswered() {
-        stopRingtoneAndVibration()
-        cancelWatchAlert()
-        incomingBottomLayout.visibility = View.GONE
-        activeCallPanel.visibility = View.VISIBLE
-
-        seconds = 0
-        timerHandler.post(object : Runnable {
-            override fun run() {
-                val mins = seconds / 60
-                val secs = seconds % 60
-                subStatusText.text = String.format("HD Voice  %02d:%02d", mins, secs)
-                subStatusText.setTextColor(Color.parseColor("#81C784"))
-                seconds++
-                timerHandler.postDelayed(this, 1000)
-            }
-        })
-    }
-
-    private fun endCallAndClose() {
-        stopRingtoneAndVibration()
-        cancelWatchAlert()
-        timerHandler.removeCallbacksAndMessages(null)
-        finish()
-    }
-
-    private fun startRingtoneAndVibration() {
-        try {
-            val uri: Uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-            ringtone = RingtoneManager.getRingtone(applicationContext, uri)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                ringtone?.audioAttributes = AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-            }
-            ringtone?.play()
-        } catch (e: Exception) {}
-
-        try {
-            vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-            val pattern = longArrayOf(0, 1000, 1000)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator?.vibrate(VibrationEffect.createWaveform(pattern, 0))
-            } else {
-                @Suppress("DEPRECATION")
-                vibrator?.vibrate(pattern, 0)
-            }
-        } catch (e: Exception) {}
-    }
-
-    private fun stopRingtoneAndVibration() {
-        try { ringtone?.stop() } catch (e: Exception) {}
-        try { vibrator?.cancel() } catch (e: Exception) {}
-    }
-
-    private fun sendWatchAlert(name: String, number: String) {
+    private fun sendWatchCallAlert(name: String, number: String) {
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                val audioAttr = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+
                 val channel = NotificationChannel(
                     CHANNEL_ID,
-                    "Watch Call Sync",
+                    "수신 전화 워치 연동",
                     NotificationManager.IMPORTANCE_HIGH
-                ).apply { enableVibration(true) }
+                ).apply {
+                    enableVibration(true)
+                    vibrationPattern = longArrayOf(0, 1000, 500, 1000, 500, 1000)
+                    setSound(ringtoneUri, audioAttr)
+                }
                 nm.createNotificationChannel(channel)
             }
-            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+
+            val intent = Intent(this, MainActivity::class.java)
+            val pendingIntent = PendingIntent.getActivity(
+                this, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val caller = Person.Builder().setName(name).setImportant(true).build()
                 Notification.Builder(this, CHANNEL_ID)
+                    .setSmallIcon(android.R.drawable.sym_action_call)
+                    .setContentTitle(name)
+                    .setContentText(number)
+                    .setStyle(Notification.CallStyle.forIncomingCall(caller, pendingIntent, pendingIntent))
+                    .setCategory(Notification.CATEGORY_CALL)
+                    .setFullScreenIntent(pendingIntent, true)
+                    .setOngoing(true)
             } else {
                 @Suppress("DEPRECATION")
                 Notification.Builder(this)
+                    .setSmallIcon(android.R.drawable.sym_action_call)
+                    .setContentTitle(name)
+                    .setContentText(number)
+                    .setCategory(Notification.CATEGORY_CALL)
+                    .setFullScreenIntent(pendingIntent, true)
+                    .setOngoing(true)
             }
-            builder.setSmallIcon(android.R.drawable.sym_action_call)
-                .setContentTitle("📞 $name")
-                .setContentText(number)
-                .setAutoCancel(true)
+
             nm.notify(WATCH_NOTIF_ID, builder.build())
         } catch (e: Exception) {}
     }
 
-    private fun cancelWatchAlert() {
+    private fun cancelWatchNotification() {
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.cancel(WATCH_NOTIF_ID)
         } catch (e: Exception) {}
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        stopRingtoneAndVibration()
-        cancelWatchAlert()
-        timerHandler.removeCallbacksAndMessages(null)
     }
 }
