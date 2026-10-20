@@ -9,16 +9,20 @@
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
-    <!-- 워치 화면에 'Team Call'이라는 앱 이름이 뜨지 않도록 투명 공백(&#8203;) 처리! -->
+    <!-- [핵심] 새로 만든 파란색 전화기 아이콘(@drawable/ic_launcher) 장착 및 이름을 '팀전화'로 변경! -->
     <application
         android:allowBackup="true"
-        android:label="수신전화"
+        android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher"
+        android:label="팀전화"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
+        <!-- 바탕화면(홈 화면) 아이콘 이름을 '팀전화'로 깔끔하게 표시! -->
         <activity
             android:name=".MainActivity"
-            android:label="&#8203;"
+            android:label="팀전화"
+            android:icon="@drawable/ic_launcher"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
