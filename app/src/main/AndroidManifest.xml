@@ -9,14 +9,16 @@
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- 워치 화면에 'Team Call'이라는 앱 이름이 뜨지 않도록 투명 공백(&#8203;) 처리! -->
     <application
         android:allowBackup="true"
-        android:label="Team Call"
+        android:label="&#8203;"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
         <activity
             android:name=".MainActivity"
+            android:label="&#8203;"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
