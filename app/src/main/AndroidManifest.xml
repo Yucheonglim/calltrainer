@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 선 연결(WebADB)로 설치하므로 모든 순정 전화 & 워치 권한을 100% 안전하게 사용합니다! -->
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.WRITE_CONTACTS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.VIBRATE" />
@@ -23,7 +24,6 @@
             </intent-filter>
         </activity>
 
-        <!-- 폴드8 울트라의 100% 진짜 최신 순정 전화 화면을 그대로 띄우는 심장부 -->
         <service
             android:name=".FakeCallService"
             android:label="HD Voice"
