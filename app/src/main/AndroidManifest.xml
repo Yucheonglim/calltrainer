@@ -12,7 +12,7 @@
     <!-- 워치 화면에 'Team Call'이라는 앱 이름이 뜨지 않도록 투명 공백(&#8203;) 처리! -->
     <application
         android:allowBackup="true"
-        android:label="&#8203;"
+        android:label="수신전화"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
