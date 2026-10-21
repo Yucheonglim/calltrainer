@@ -5,8 +5,6 @@ import android.app.*
 import android.content.*
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
-import android.media.AudioAttributes
-import android.media.RingtoneManager
 import android.net.Uri
 import android.os.*
 import android.provider.ContactsContract
@@ -45,7 +43,7 @@ class MainActivity : Activity() {
 
         mainScrollView = ScrollView(this).apply {
             setBackgroundColor(Color.parseColor("#F4F6F9"))
-            visibility = View.INVISIBLE // [핵심] 지문 인증 통과 전까지는 화면을 아예 숨김!
+            visibility = View.INVISIBLE
         }
 
         val mainLayout = LinearLayout(this).apply {
@@ -71,7 +69,6 @@ class MainActivity : Activity() {
             setPadding(20, 30, 20, 30)
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 25) }
             setOnClickListener {
-                isUnlocked = true // 연락처 창 갔다 올 때는 잠금 유지
                 startActivityForResult(Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI), 1001)
             }
         })
@@ -145,7 +142,6 @@ class MainActivity : Activity() {
             setTextColor(Color.parseColor("#333333"))
             background = roundBg("#E0E0E0", 20f)
             setOnClickListener {
-                isUnlocked = true
                 startActivity(Intent(TelecomManager.ACTION_CHANGE_PHONE_ACCOUNTS))
             }
         })
@@ -154,65 +150,43 @@ class MainActivity : Activity() {
         mainScrollView.addView(mainLayout)
         setContentView(mainScrollView)
 
-        // 앱을 켜자마자 폴드8 지문/생체인증 잠금창 실행!
-        checkFingerprintLock()
+        // [수정 완료] 오직 앱을 처음 켤 때(onCreate) 딱 1번만 지문 인증 실행!
+        checkFingerprintOnce()
     }
 
-    // [지문 잠금 핵심 함수] 핸드폰에 등록된 지문/생체인증/패턴을 검사합니다!
-    private fun checkFingerprintLock() {
-        if (isUnlocked) return
+    private fun checkFingerprintOnce() {
+        if (isUnlocked) {
+            mainScrollView.visibility = View.VISIBLE
+            return
+        }
         val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         if (km.isKeyguardSecure) {
             @Suppress("DEPRECATION")
-            val authIntent = km.createConfirmDeviceCredentialIntent("🔒 팀전화 보안 인증", "지문을 인식하거나 잠금을 해제해 주세요.")
+            val authIntent = km.createConfirmDeviceCredentialIntent("🔒 팀전화 보안 인증", "지문을 인식해 주세요.")
             if (authIntent != null) {
                 startActivityForResult(authIntent, AUTH_REQUEST_CODE)
             } else {
+                isUnlocked = true
                 mainScrollView.visibility = View.VISIBLE
             }
         } else {
-            // 만약 폰 자체에 잠금이 아예 안 걸려 있을 때만 바로 열림
+            isUnlocked = true
             mainScrollView.visibility = View.VISIBLE
-        }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        // 앱을 닫고 홈 화면으로 나가면 다시 자동으로 잠금 상태로 전환!
-        if (!isChangingConfigurations) {
-            isUnlocked = false
-            mainScrollView.visibility = View.INVISIBLE
-        }
-    }
-
-    override fun onRestart() {
-        super.onRestart()
-        // 다시 앱을 켜면 또 지문을 물어보도록 철통 보안 적용!
-        if (!isUnlocked) {
-            checkFingerprintLock()
         }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-
-        // 1. 지문 인증 결과 확인
         if (requestCode == AUTH_REQUEST_CODE) {
             if (resultCode == RESULT_OK) {
-                // 지문 일치! 숨겨둔 화면을 짠 하고 보여줌!
                 isUnlocked = true
                 mainScrollView.visibility = View.VISIBLE
             } else {
-                // 지문 틀리거나 취소 누르면 즉시 앱을 꺼버림 (남이 절대 못 봄!)
-                Toast.makeText(this, "보안 인증이 취소되어 앱을 종료합니다.", Toast.LENGTH_SHORT).show()
                 finish()
             }
             return
         }
-
-        // 2. 연락처 불러오기 결과 확인
         if (requestCode == 1001 && resultCode == RESULT_OK) {
-            mainScrollView.visibility = View.VISIBLE
             val uri = data?.data ?: return
             val proj = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER)
             contentResolver.query(uri, proj, null, null, null)?.use { c ->
@@ -221,8 +195,6 @@ class MainActivity : Activity() {
                     numberInput.setText(formatNum(c.getString(1) ?: ""))
                 }
             }
-        } else if (requestCode == 1001) {
-            mainScrollView.visibility = View.VISIBLE
         }
     }
 
@@ -264,11 +236,9 @@ class MainActivity : Activity() {
         setColor(Color.parseColor(hex)); cornerRadius = r
     }
 }
-
-
 class FakeCallService : ConnectionService() {
     private val NOTIF_ID = 9999
-    private val CH_ID = "fold8_watch_sync_v7"
+    private val CH_ID = "fold8_watch_sync_v8"
 
     override fun onCreateIncomingConnection(account: PhoneAccountHandle?, req: ConnectionRequest?): Connection {
         val extras = req?.extras
@@ -281,8 +251,8 @@ class FakeCallService : ConnectionService() {
             cleanNum.dropLast(1) + (if (last == '9') '8' else (last + 1))
         } else "01098765432"
 
-        // 큰 글씨 이름만 주소록으로 띄우기 위해 임시 연락처 등록
-        val tempId = addTempContact(callerName, tempNum)
+        // [핵심 해결] 통화목록(최근 기록)에도 이름이 영구적으로 표시되도록 이름표를 유지합니다!
+        ensureContactForCallLog(callerName, tempNum)
 
         val conn = object : Connection() {
             override fun onAnswer() {
@@ -293,33 +263,41 @@ class FakeCallService : ConnectionService() {
             override fun onReject() {
                 super.onReject()
                 clearWatchAlert()
-                removeTempContact(tempId)
                 setDisconnected(DisconnectCause(DisconnectCause.REJECTED))
                 destroy()
             }
             override fun onDisconnect() {
                 super.onDisconnect()
                 clearWatchAlert()
-                removeTempContact(tempId)
                 setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
                 destroy()
             }
         }
 
-        // [핵심 수정 1] 전화번호 밑에 작은 글씨로 이름이 한 번 더 중복 출력되던 setCallerDisplayName을 제거!
-        // 이제 큰 이름 1개 + 전화번호 1개만 깔끔하게 나옵니다!
         conn.setAddress(Uri.fromParts("tel", tempNum, null), TelecomManager.PRESENTATION_ALLOWED)
         conn.setRinging()
 
-        // [핵심 수정 2] 워치에는 전화번호 없이 오직 '연락처 이름'만 깔끔하게 전송!
         ringWatch(callerName)
         return conn
     }
 
-    private fun addTempContact(name: String, number: String): Long {
+    private fun ensureContactForCallLog(name: String, number: String) {
         try {
+            // 이전에 만든 같은 번호의 임시 연락처가 있으면 먼저 정리 후 최신 이름으로 등록
+            val lookupUri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
+            contentResolver.query(lookupUri, arrayOf(ContactsContract.PhoneLookup.CONTACT_ID), null, null, null)?.use { c ->
+                while (c.moveToNext()) {
+                    val contactId = c.getLong(0)
+                    contentResolver.delete(
+                        ContactsContract.RawContacts.CONTENT_URI,
+                        "${ContactsContract.RawContacts.CONTACT_ID}=?",
+                        arrayOf(contactId.toString())
+                    )
+                }
+            }
+
             val rawUri = contentResolver.insert(ContactsContract.RawContacts.CONTENT_URI, ContentValues())
-            val rawId = ContentUris.parseId(rawUri ?: return -1L)
+            val rawId = ContentUris.parseId(rawUri ?: return)
 
             val nameValues = ContentValues().apply {
                 put(ContactsContract.Data.RAW_CONTACT_ID, rawId)
@@ -335,17 +313,6 @@ class FakeCallService : ConnectionService() {
                 put(ContactsContract.CommonDataKinds.Phone.TYPE, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
             }
             contentResolver.insert(ContactsContract.Data.CONTENT_URI, phoneValues)
-            return rawId
-        } catch (e: Exception) {
-            return -1L
-        }
-    }
-
-    private fun removeTempContact(rawId: Long) {
-        if (rawId <= 0L) return
-        try {
-            val uri = ContentUris.withAppendedId(ContactsContract.RawContacts.CONTENT_URI, rawId)
-            contentResolver.delete(uri, null, null)
         } catch (e: Exception) {}
     }
 
@@ -365,7 +332,6 @@ class FakeCallService : ConnectionService() {
                 @Suppress("DEPRECATION")
                 Notification.Builder(this)
             }
-            // 워치 화면에는 전화번호나 Team Call 없이 오직 '연락처 이름'만 출력!
             b.setSmallIcon(android.R.drawable.sym_action_call)
                 .setContentTitle(name)
                 .setContentText("수신전화")
