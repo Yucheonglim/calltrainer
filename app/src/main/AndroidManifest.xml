@@ -8,10 +8,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.VIBRATE" />
-    <!-- [5분 절전 방지 핵심 권한] 화면을 꺼놔도 5분 뒤 정확히 울리게 하는 권한 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <!-- [전략 3 추가] 오픈AI 서버와 실시간 사람 목소리를 주고받기 위한 인터넷 & 마이크 권한 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:allowBackup="true"
@@ -32,10 +34,9 @@
             </intent-filter>
         </activity>
 
-        <!-- 5분 뒤 잠든 폰을 강제로 깨워 전화를 울리는 정밀 알람 수신기 -->
         <receiver
             android:name=".AlarmCallReceiver"
-            android:exported="false" />
+            android:exported="true" />
 
         <service
             android:name=".FakeCallService"
