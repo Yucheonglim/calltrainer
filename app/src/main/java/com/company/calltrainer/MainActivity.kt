@@ -5,42 +5,62 @@ import android.app.*
 import android.content.*
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
+import android.media.*
 import android.net.Uri
 import android.os.*
 import android.provider.ContactsContract
+import android.speech.*
 import android.telecom.*
 import android.view.Gravity
 import android.view.View
 import android.widget.*
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.*
 
 class MainActivity : Activity() {
+    private lateinit var telecomManager: TelecomManager
+    private lateinit var phoneAccountHandle: PhoneAccountHandle
     private lateinit var nameInput: EditText
     private lateinit var numberInput: EditText
+    private lateinit var promptInput: EditText
+    private lateinit var apiKeyInput: EditText
     private lateinit var mainScrollView: ScrollView
     private lateinit var scheduleStatusText: TextView
-    private lateinit var cancelBtn: Button
-    private var countDownTimer: CountDownTimer? = null
-    private var wakeLock: PowerManager.WakeLock? = null
+    private lateinit var cancelScheduleBtn: Button
+    private lateinit var aiConfigBox: LinearLayout
+    private val uiTimerHandler = Handler(Looper.getMainLooper())
     private val AUTH_REQUEST_CODE = 5555
     private var isUnlocked = false
+    private var targetRingTimeMillis = 0L
+    private var scheduledName = ""
+    private var scheduledNumber = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        val prefs = getSharedPreferences("TeamCallPrefs", Context.MODE_PRIVATE)
+
         val perms = mutableListOf(
             Manifest.permission.READ_CONTACTS,
             Manifest.permission.WRITE_CONTACTS,
-            Manifest.permission.READ_PHONE_STATE
+            Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.RECORD_AUDIO
         )
         if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS)
         requestPermissions(perms.toTypedArray(), 3000)
 
-        val tm = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-        val handle = PhoneAccountHandle(ComponentName(this, FakeCallService::class.java), "HD_Voice_Trainer")
-        val account = PhoneAccount.builder(handle, "HD Voice")
+        telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+        phoneAccountHandle = PhoneAccountHandle(ComponentName(this, FakeCallService::class.java), "HD_Voice_Trainer")
+        val phoneAccount = PhoneAccount.builder(phoneAccountHandle, "HD Voice")
             .setCapabilities(PhoneAccount.CAPABILITY_CALL_PROVIDER)
             .build()
-        tm.registerPhoneAccount(account)
+        telecomManager.registerPhoneAccount(phoneAccount)
 
         mainScrollView = ScrollView(this).apply {
             setBackgroundColor(Color.parseColor("#F4F6F9"))
@@ -60,7 +80,7 @@ class MainActivity : Activity() {
             setPadding(10, 0, 0, 50)
         })
 
-        // 1. 연락처 및 입력 카드
+        // 1. 연락처 입력 카드
         val step1Card = createCard()
         step1Card.addView(Button(this).apply {
             text = "📒 연락처 불러오기"
@@ -77,7 +97,7 @@ class MainActivity : Activity() {
 
         nameInput = EditText(this).apply {
             hint = "이름 입력"
-            setText("대한건설 김철수 소장")
+            setText("대표회계사")
             textSize = 16f
             setPadding(35, 30, 35, 30)
             background = roundBg("#F8F9FA", 16f)
@@ -94,7 +114,7 @@ class MainActivity : Activity() {
         step1Card.addView(numberInput)
         mainLayout.addView(step1Card)
 
-        // 2. 시간 선택 카드
+        // 2. 시간 선택 + [벨소리만 vs AI 목소리] 선택 카드
         val step2Card = createCard()
         val timeGroup = RadioGroup(this).apply {
             orientation = RadioGroup.HORIZONTAL
@@ -105,23 +125,62 @@ class MainActivity : Activity() {
             addView(createRadio(104, "5분", false))
         }
         step2Card.addView(timeGroup)
-        mainLayout.addView(step2Card)
 
-        // 3. [신규 추가!] 실시간 콜 스케줄러 표시창 + 실행 버튼 카드
-        val step3Card = createCard()
-
-        scheduleStatusText = TextView(this).apply {
-            text = "📋 예약 대기 중 (현재 예약된 콜이 없습니다)"
-            textSize = 14f
-            setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#555555"))
-            background = roundBg("#F1F3F5", 20f)
-            setPadding(35, 35, 35, 35)
+        // [신규 추가!] 벨소리만 울릴지, AI 사람 목소리가 나올지 선택하는 스위치
+        val modeGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
             gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 30) }
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 30, 0, 0) }
+            addView(createRadio(201, "🔕 벨소리만", true))
+            addView(createRadio(202, "🤖 AI 음성통화", false))
+        }
+        step2Card.addView(modeGroup)
+
+        // [AI 음성통화 선택 시 나타나는 세부 설정창]
+        aiConfigBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 25, 0, 0) }
         }
 
-        val startBtn = Button(this).apply {
+        val voiceGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            gravity = Gravity.CENTER
+            addView(createRadio(301, "👔 중년 남성(Onyx)", true))
+            addView(createRadio(302, "👩 차분한 여성(Nova)", false))
+        }
+
+        promptInput = EditText(this).apply {
+            hint = "AI가 전화 받자마자 할 첫마디 또는 상황 입력"
+            setText(prefs.getString("SAVED_PROMPT", "안녕하세요, 대표님 박입니다. 건설사 감사 결제때문에 연락드렸습니다."))
+            textSize = 14f
+            setPadding(30, 25, 30, 25)
+            background = roundBg("#F8F9FA", 16f)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 15, 0, 15) }
+        }
+
+        apiKeyInput = EditText(this).apply {
+            hint = "OpenAI API 키 입력 (sk-... 한 번만 입력하면 자동저장)"
+            setText(prefs.getString("OPENAI_KEY", ""))
+            textSize = 13f
+            setPadding(30, 25, 30, 25)
+            background = roundBg("#FFF8E1", 16f)
+        }
+
+        aiConfigBox.addView(voiceGroup)
+        aiConfigBox.addView(promptInput)
+        aiConfigBox.addView(apiKeyInput)
+        step2Card.addView(aiConfigBox)
+
+        modeGroup.setOnCheckedChangeListener { _, checkedId ->
+            aiConfigBox.visibility = if (checkedId == 202) View.VISIBLE else View.GONE
+        }
+
+        mainLayout.addView(step2Card)
+
+        // 3. 실행 버튼 및 스케줄러 표시창 카드
+        val step3Card = createCard()
+        step3Card.addView(Button(this).apply {
             text = "START SECURE CALL"
             textSize = 17f
             setTypeface(null, Typeface.BOLD)
@@ -131,6 +190,24 @@ class MainActivity : Activity() {
             setOnClickListener {
                 val name = nameInput.text.toString().ifBlank { "Unknown" }
                 val number = numberInput.text.toString().ifBlank { "010-0000-0000" }
+                val useAi = (modeGroup.checkedRadioButtonId == 202)
+                val voiceType = if (voiceGroup.checkedRadioButtonId == 301) "onyx" else "nova"
+                val promptTxt = promptInput.text.toString().ifBlank { "여보세요, 통화 가능하십니까?" }
+                val apiKeyTxt = apiKeyInput.text.toString().trim()
+
+                if (useAi && apiKeyTxt.isEmpty()) {
+                    Toast.makeText(context, "AI 통화를 위해 OpenAI API 키(sk-...)를 입력해 주세요!", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+
+                // 입력한 API 키와 대사는 다음번에 또 치지 않게 자동 저장!
+                prefs.edit()
+                    .putString("OPENAI_KEY", apiKeyTxt)
+                    .putString("SAVED_PROMPT", promptTxt)
+                    .putBoolean("USE_AI", useAi)
+                    .putString("VOICE_TYPE", voiceType)
+                    .apply()
+
                 val delay = when (timeGroup.checkedRadioButtonId) {
                     101 -> 5000L
                     102 -> 15000L
@@ -140,21 +217,29 @@ class MainActivity : Activity() {
                 }
                 scheduleExactCall(name, number, delay)
             }
+        })
+
+        scheduleStatusText = TextView(this).apply {
+            text = "📅 예약된 콜 내역이 없습니다."
+            textSize = 14f
+            setTextColor(Color.parseColor("#555555"))
+            background = roundBg("#F1F5F9", 20f)
+            setPadding(35, 35, 35, 35)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 30, 0, 0) }
         }
 
-        cancelBtn = Button(this).apply {
+        cancelScheduleBtn = Button(this).apply {
             text = "예약 취소"
-            textSize = 14f
+            textSize = 13f
             setTextColor(Color.parseColor("#D32F2F"))
-            background = roundBg("#FFEBEE", 20f)
+            background = roundBg("#FFEBEE", 18f)
             visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 20, 0, 0) }
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 15, 0, 0) }
             setOnClickListener { cancelScheduledCall() }
         }
 
         step3Card.addView(scheduleStatusText)
-        step3Card.addView(startBtn)
-        step3Card.addView(cancelBtn)
+        step3Card.addView(cancelScheduleBtn)
         mainLayout.addView(step3Card)
 
         // 4. 하단 통화 허용 설정 카드
@@ -180,99 +265,72 @@ class MainActivity : Activity() {
         checkFingerprintOnce()
     }
 
-    // [핵심 해결] 5분 뒤 화면이 꺼져 있어도 100% 울리게 하는 시스템 알람 + 실시간 카운트다운 표시창!
     private fun scheduleExactCall(name: String, number: String, delayMillis: Long) {
-        cancelScheduledCall()
+        cancelScheduledCall(showToast = false)
+        scheduledName = name
+        scheduledNumber = number
+        targetRingTimeMillis = System.currentTimeMillis() + delayMillis
 
-        // 1. 폴드8이 5분 동안 절전 모드로 잠들지 못하게 CPU 깨어있기 잠금(WakeLock) 작동!
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TeamCall::ExactTimerLock").apply {
-            acquire(delayMillis + 10000L)
-        }
-
-        // 2. 갤럭시 모닝콜 알람 시계(setAlarmClock)에 정밀 등록 (절전 모드 100% 관통!)
         val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(this, AlarmCallReceiver::class.java).apply {
             putExtra("CALLER_NAME", name)
             putExtra("CALLER_NUMBER", number)
         }
-        val pi = PendingIntent.getBroadcast(
-            this, 777, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val triggerTime = System.currentTimeMillis() + delayMillis
-        val clockInfo = AlarmManager.AlarmClockInfo(triggerTime, pi)
-        am.setAlarmClock(clockInfo, pi)
+        val pi = PendingIntent.getBroadcast(this, 777, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        am.setAlarmClock(AlarmManager.AlarmClockInfo(targetRingTimeMillis, pi), pi)
 
-        // 3. 스케줄러 표시창에 1초 단위로 남은 시간 실시간 표시!
-        cancelBtn.visibility = View.VISIBLE
-        scheduleStatusText.background = roundBg("#E8F5E9", 20f)
-        scheduleStatusText.setTextColor(Color.parseColor("#1B5E20"))
-
-        countDownTimer = object : CountDownTimer(delayMillis, 1000) {
-            override fun onTick(millisUntilFinished: Long) {
-                val totalSec = (millisUntilFinished / 1000) + 1
-                val min = totalSec / 60
-                val sec = totalSec % 60
-                val timeStr = if (min > 0) "${min}분 ${sec}초" else "${sec}초"
-                scheduleStatusText.text = "⏰ 예약된 발신자: $name\n($number)\n\n📞 콜 도착까지 남은 시간: $timeStr"
-            }
-
-            override fun onFinish() {
-                scheduleStatusText.text = "✅ [$name] 콜 발신이 실행되었습니다!"
-                scheduleStatusText.background = roundBg("#E3F2FD", 20f)
-                scheduleStatusText.setTextColor(Color.parseColor("#1565C0"))
-                cancelBtn.visibility = View.GONE
-            }
-        }.start()
+        cancelScheduleBtn.visibility = View.VISIBLE
+        startCountdownUi()
+        Toast.makeText(this, "콜 스케줄이 등록되었습니다.", Toast.LENGTH_SHORT).show()
     }
 
-    private fun cancelScheduledCall() {
-        countDownTimer?.cancel()
-        try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-        } catch (e: Exception) {}
-
+    private fun cancelScheduledCall(showToast: Boolean = true) {
         val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val intent = Intent(this, AlarmCallReceiver::class.java)
-        val pi = PendingIntent.getBroadcast(
-            this, 777, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val pi = PendingIntent.getBroadcast(this, 777, Intent(this, AlarmCallReceiver::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         am.cancel(pi)
-
-        scheduleStatusText.text = "📋 예약 대기 중 (현재 예약된 콜이 없습니다)"
-        scheduleStatusText.background = roundBg("#F1F3F5", 20f)
+        uiTimerHandler.removeCallbacksAndMessages(null)
+        targetRingTimeMillis = 0L
+        scheduleStatusText.text = "📅 예약된 콜 내역이 없습니다."
         scheduleStatusText.setTextColor(Color.parseColor("#555555"))
-        cancelBtn.visibility = View.GONE
+        cancelScheduleBtn.visibility = View.GONE
+        if (showToast) Toast.makeText(this, "예약된 콜이 취소되었습니다.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun startCountdownUi() {
+        val targetTimeStr = SimpleDateFormat("a h:mm:ss", Locale.KOREA).format(Date(targetRingTimeMillis))
+        uiTimerHandler.post(object : Runnable {
+            override fun run() {
+                val remain = targetRingTimeMillis - System.currentTimeMillis()
+                if (remain <= 0L) {
+                    scheduleStatusText.text = "✅ [$scheduledName] 콜 발신 완료!"
+                    scheduleStatusText.setTextColor(Color.parseColor("#2E7D32"))
+                    cancelScheduleBtn.visibility = View.GONE
+                    return
+                }
+                val totalSec = (remain / 1000) + 1
+                val remainStr = if (totalSec / 60 > 0) "${totalSec / 60}분 ${totalSec % 60}초 후" else "${totalSec % 60}초 후"
+                scheduleStatusText.text = "📌 예약 대상: $scheduledName ($scheduledNumber)\n⏰ 예정 시각: $targetTimeStr ($remainStr 콜 도착)"
+                scheduleStatusText.setTextColor(Color.parseColor("#1565C0"))
+                uiTimerHandler.postDelayed(this, 500)
+            }
+        })
     }
 
     private fun checkFingerprintOnce() {
-        if (isUnlocked) {
-            mainScrollView.visibility = View.VISIBLE
-            return
-        }
+        if (isUnlocked) { mainScrollView.visibility = View.VISIBLE; return }
         val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         if (km.isKeyguardSecure) {
             @Suppress("DEPRECATION")
             val authIntent = km.createConfirmDeviceCredentialIntent("🔒 팀전화 보안 인증", "지문을 인식해 주세요.")
-            if (authIntent != null) {
-                startActivityForResult(authIntent, AUTH_REQUEST_CODE)
-            } else {
-                isUnlocked = true
-                mainScrollView.visibility = View.VISIBLE
-            }
-        } else {
-            isUnlocked = true
-            mainScrollView.visibility = View.VISIBLE
-        }
+            if (authIntent != null) startActivityForResult(authIntent, AUTH_REQUEST_CODE)
+            else { isUnlocked = true; mainScrollView.visibility = View.VISIBLE }
+        } else { isUnlocked = true; mainScrollView.visibility = View.VISIBLE }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == AUTH_REQUEST_CODE) {
-            if (resultCode == RESULT_OK) {
-                isUnlocked = true
-                mainScrollView.visibility = View.VISIBLE
-            } else finish()
+            if (resultCode == RESULT_OK) { isUnlocked = true; mainScrollView.visibility = View.VISIBLE } else finish()
             return
         }
         if (requestCode == 1001 && resultCode == RESULT_OK) {
@@ -297,7 +355,7 @@ class MainActivity : Activity() {
     }
 
     private fun createRadio(idVal: Int, txt: String, chk: Boolean) = RadioButton(this).apply {
-        id = idVal; text = txt; textSize = 15f; isChecked = chk
+        id = idVal; text = txt; textSize = 14f; isChecked = chk
         layoutParams = RadioGroup.LayoutParams(0, -2, 1f)
     }
 
@@ -314,12 +372,16 @@ class MainActivity : Activity() {
     }
 }
 
-// 5분이 지나도 잠든 폴드8을 강제로 깨워서 전화를 거는 알람 수신기!
 class AlarmCallReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        @Suppress("DEPRECATION")
+        val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "TeamCall:Wake")
+        wl.acquire(10000L)
+
+        val name = intent.getStringExtra("CALLER_NAME") ?: "Unknown"
+        val number = intent.getStringExtra("CALLER_NUMBER") ?: "010-0000-0000"
         try {
-            val name = intent.getStringExtra("CALLER_NAME") ?: "Unknown"
-            val number = intent.getStringExtra("CALLER_NUMBER") ?: "010-0000-0000"
             val tm = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
             val handle = PhoneAccountHandle(ComponentName(context, FakeCallService::class.java), "HD_Voice_Trainer")
             val extras = Bundle().apply {
@@ -330,6 +392,7 @@ class AlarmCallReceiver : BroadcastReceiver() {
         } catch (e: Exception) {}
     }
 }
+
 
 
 
@@ -608,3 +671,4 @@ class FakeCallService : ConnectionService() {
         } catch (e: Exception) {}
     }
 }
+
