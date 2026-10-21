@@ -8,8 +8,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- [5분 절전 방지 핵심 권한] 화면을 꺼놔도 5분 뒤 정확히 울리게 하는 권한 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
-    <!-- [핵심] 새로 만든 파란색 전화기 아이콘(@drawable/ic_launcher) 장착 및 이름을 '팀전화'로 변경! -->
     <application
         android:allowBackup="true"
         android:icon="@drawable/ic_launcher"
@@ -18,7 +21,6 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
 
-        <!-- 바탕화면(홈 화면) 아이콘 이름을 '팀전화'로 깔끔하게 표시! -->
         <activity
             android:name=".MainActivity"
             android:label="팀전화"
@@ -29,6 +31,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 5분 뒤 잠든 폰을 강제로 깨워 전화를 울리는 정밀 알람 수신기 -->
+        <receiver
+            android:name=".AlarmCallReceiver"
+            android:exported="false" />
 
         <service
             android:name=".FakeCallService"
