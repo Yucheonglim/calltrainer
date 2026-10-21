@@ -562,30 +562,35 @@ class AlarmCallReceiver : BroadcastReceiver() {
 
 
 
-
-
-
 class FakeCallService : ConnectionService() {
     private val NOTIF_ID = 9999
     private val CH_ID = "fold8_watch_sync_v9"
     private var mediaPlayer: MediaPlayer? = null
-    private var speechRecognizer: SpeechRecognizer? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var isCallActive = false
+    private var isRecording = false
     private val chatHistory = JSONArray()
+    private var preloadedFirstAudio: File? = null
 
-    override fun onCreateIncomingConnection(account: PhoneAccountHandle?, req: ConnectionRequest?): Connection {
-        val extras = req?.extras
-        val callerName = extras?.getString("CALLER_NAME") ?: "Unknown"
+    override fun onCreateIncomingConnection(
+        connectionManagerPhoneAccount: PhoneAccountHandle?,
+        request: ConnectionRequest?
+    ): Connection {
+        val extras = request?.extras
+        val callerName = extras?.getString("CALLER_NAME") ?: "알 수 없음"
         val rawNumber = extras?.getString("CALLER_NUMBER") ?: "010-0000-0000"
-        val cleanNum = rawNumber.replace(Regex("[^0-9]"), "")
 
+        val cleanNum = rawNumber.replace(Regex("[^0-9]"), "")
         val tempNum = if (cleanNum.length >= 4) {
-            val last = cleanNum.last()
-            cleanNum.dropLast(1) + (if (last == '9') '8' else (last + 1))
+            val lastChar = cleanNum.last()
+            val nextChar = if (lastChar == '9') '8' else (lastChar + 1)
+            cleanNum.dropLast(1) + nextChar
         } else "01098765432"
 
         ensureContactForCallLog(callerName, tempNum)
+
+        // 벨이 울리는 동안 첫마디 목소리를 미리 다운로드(0.1초 즉시 응답용)
+        preloadFirstAiVoice(callerName)
 
         val conn = object : Connection() {
             override fun onAnswer() {
@@ -593,7 +598,6 @@ class FakeCallService : ConnectionService() {
                 clearWatchAlert()
                 setActive()
                 isCallActive = true
-                // 전화를 받는 순간 AI 음성통화 모드가 켜져 있으면 즉시 사람 목소리 시작!
                 startAiConversationIfEnabled(callerName)
             }
             override fun onReject() {
@@ -612,130 +616,248 @@ class FakeCallService : ConnectionService() {
 
         conn.setAddress(Uri.fromParts("tel", tempNum, null), TelecomManager.PRESENTATION_ALLOWED)
         conn.setRinging()
-
         ringWatch(callerName)
         return conn
     }
 
+    private fun preloadFirstAiVoice(callerName: String) {
+        val prefs = getSharedPreferences("TeamCallPrefs", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("USE_AI", false)) return
+        val apiKey = prefs.getString("OPENAI_KEY", "") ?: ""
+        val firstLine = prefs.getString("SAVED_PROMPT", "안녕하세요? 대표님!") ?: "여보세요?"
+        val voice = prefs.getString("VOICE_TYPE", "onyx") ?: "onyx"
+        val speed = prefs.getFloat("VOICE_SPEED", 1.0f).toDouble()
+        if (apiKey.isEmpty()) return
+
+        chatHistory. encryptedClear()
+        val sysPrompt = "당신은 '$callerName'입니다. 현재 상대방(대표님/담당자)에게 전화를 걸어 통화 중입니다. 첫마디 대사의 상황과 감정을 끝까지 유지하며 실제 전화 통화처럼 자연스럽고 짧게(1~2문장 이내로) 대답하세요."
+        chatHistory.put(JSONObject().put("role", "system").put("content", sysPrompt))
+        chatHistory.put(JSONObject().put("role", "assistant").put("content", firstLine))
+
+        Thread {
+            preloadedFirstAudio = downloadTtsFile(apiKey, firstLine, voice, speed, "preload_first.mp3")
+        }.start()
+    }
+
+    private fun JSONArray.encryptedClear() {
+        while (this.length() > 0) this.remove(0)
+    }
+
     private fun startAiConversationIfEnabled(callerName: String) {
         val prefs = getSharedPreferences("TeamCallPrefs", Context.MODE_PRIVATE)
-        val useAi = prefs.getBoolean("USE_AI", false)
+        if (!prefs.getBoolean("USE_AI", false)) return
         val apiKey = prefs.getString("OPENAI_KEY", "") ?: ""
-        val prompt = prefs.getString("SAVED_PROMPT", "여보세요, 통화 가능하십니까?") ?: ""
+        val firstLine = prefs.getString("SAVED_PROMPT", "여보세요?") ?: "여보세요?"
         val voice = prefs.getString("VOICE_TYPE", "onyx") ?: "onyx"
+        val speed = prefs.getFloat("VOICE_SPEED", 1.0f).toDouble()
+        if (apiKey.isEmpty()) return
 
-        if (!useAi || apiKey.isEmpty()) return
+        Thread {
+            // 미리 받아둔 파일이 있으면 0.1초 만에 즉시 재생, 아직 안 받아졌으면 최대 1.5초 대기 후 재생
+            var waitCount = 0
+            while (preloadedFirstAudio == null && waitCount < 15 && isCallActive) {
+                Thread.sleep(100)
+                waitCount++
+            }
+            val fileToPlay = preloadedFirstAudio ?: downloadTtsFile(apiKey, firstLine, voice, speed, "first_fallback.mp3")
+            if (fileToPlay != null && isCallActive) {
+                playAudioFile(fileToPlay) {
+                    if (isCallActive) recordAndRecognizeUserVoice(apiKey, voice, speed)
+                }
+            }
+        }.start()
+    }
 
-        // AI에게 상대방 역할 부여
-        val sysMsg = JSONObject().apply {
-            put("role", "system")
-            put("content", "당신은 지금 전화를 건 '$callerName'입니다. 실제 전화 통화처럼 1~2문장으로 짧고 자연스러운 구어체로만 대답하세요. 첫 상황/대사 지시: $prompt")
+    private fun downloadTtsFile(apiKey: String, text: String, voice: String, speed: Double, fileName: String): File? {
+        return try {
+            val url = URL("https://api.openai.com/v1/audio/speech")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Authorization", "Bearer $apiKey")
+                setRequestProperty("Content-Type", "application/json")
+                doOutput = true
+            }
+            val body = JSONObject().apply {
+                put("model", "tts-1")
+                put("input", text)
+                put("voice", voice)
+                put("speed", speed)
+            }
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
+            val outFile = File(cacheDir, fileName)
+            conn.inputStream.use { input ->
+                FileOutputStream(outFile).use { output -> input.copyTo(output) }
+            }
+            outFile
+        } catch (e: Exception) {
+            null
         }
-        chatHistory.put(sysMsg)
-
-        // 전화를 받자마자 0.8초 뒤에 AI가 먼저 첫마디를 사람 목소리로 건넴!
-        Thread {
-            try {
-                Thread.sleep(800)
-                if (!isCallActive) return@Thread
-                speakWithOpenAi(apiKey, voice, prompt) {
-                    listenUserReply(apiKey, voice)
-                }
-            } catch (e: Exception) {}
-        }.start()
     }
 
-    // 오픈AI 최고급 사람 목소리(Onyx / Nova)를 생성해 수화기로 들려주는 함수
-    private fun speakWithOpenAi(apiKey: String, voice: String, textToSpeak: String, onDone: () -> Unit) {
-        Thread {
-            try {
-                val url = URL("https://api.openai.com/v1/audio/speech")
-                val conn = (url.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    setRequestProperty("Authorization", "Bearer $apiKey")
-                    setRequestProperty("Content-Type", "application/json")
-                    doOutput = true
-                }
-
-                val body = JSONObject().apply {
-                    put("model", "tts-1")
-                    put("input", textToSpeak)
-                    put("voice", voice)
-                }
-                conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-
-                val tempFile = File(cacheDir, "ai_voice.mp3")
-                conn.inputStream.use { input ->
-                    FileOutputStream(tempFile).use { output -> input.copyTo(output) }
-                }
-
-                mainHandler.post {
-                    if (!isCallActive) return@post
-                    try {
-                        mediaPlayer?.release()
-                        mediaPlayer = MediaPlayer().apply {
-                            setAudioAttributes(
-                                AudioAttributes.Builder()
-                                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                                    .build()
-                            )
-                            setDataSource(tempFile.absolutePath)
-                            prepare()
-                            setOnCompletionListener { onDone() }
-                            start()
-                        }
-                    } catch (e: Exception) {}
-                }
-            } catch (e: Exception) {}
-        }.start()
-    }
-
-    // 내가 수화기에 대고 말하면 알아듣고 AI 두뇌(GPT-4o-mini)가 다음 대답을 만드는 함수
-    private fun listenUserReply(apiKey: String, voice: String) {
+    private fun playAudioFile(file: File, onDone: () -> Unit) {
         mainHandler.post {
-            if (!isCallActive) return@post
             try {
-                speechRecognizer?.destroy()
-                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-                val srIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
+                mediaPlayer?.release()
+                mediaPlayer = MediaPlayer().apply {
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    setDataSource(file.absolutePath)
+                    prepare()
+                    setOnCompletionListener { onDone() }
+                    start()
                 }
-                speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-                    override fun onResults(results: Bundle?) {
-                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        val userText = matches?.firstOrNull() ?: ""
-                        if (userText.isNotBlank() && isCallActive) {
-                            askGptAndSpeak(apiKey, voice, userText)
-                        } else if (isCallActive) {
-                            listenUserReply(apiKey, voice)
-                        }
-                    }
-                    override fun onError(error: Int) {
-                        if (isCallActive) mainHandler.postDelayed({ listenUserReply(apiKey, voice) }, 1000)
-                    }
-                    override fun onReadyForSpeech(params: Bundle?) {}
-                    override fun onBeginningOfSpeech() {}
-                    override fun onRmsChanged(rmsdB: Float) {}
-                    override fun onBufferReceived(buffer: ByteArray?) {}
-                    override fun onEndOfSpeech() {}
-                    override fun onPartialResults(partialResults: Bundle?) {}
-                    override fun onEvent(eventType: Int, params: Bundle?) {}
-                })
-                speechRecognizer?.startListening(srIntent)
-            } catch (e: Exception) {}
+            } catch (e: Exception) {
+                onDone()
+            }
         }
     }
 
-    private fun askGptAndSpeak(apiKey: String, voice: String, userText: String) {
+    // 백그라운드에서도 절대 안 막히는 직접 마이크 녹음 + 무음 감지(말 끝나면 자동 전송)
+    private fun recordAndRecognizeUserVoice(apiKey: String, voice: String, speed: Double) {
+        if (!isCallActive) return
         Thread {
             try {
-                chatHistory.put(JSONObject().apply {
-                    put("role", "user")
-                    put("content", userText)
-                })
+                val sampleRate = 16000
+                val channelConfig = android.media.AudioFormat.CHANNEL_IN_MONO
+                val audioFormat = android.media.AudioFormat.ENCODING_PCM_16BIT
+                val minBufSize = android.media.AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+                val recorder = android.media.AudioRecord(
+                    android.media.MediaRecorder.AudioSource.MIC,
+                    sampleRate, channelConfig, audioFormat, minBufSize * 2
+                )
 
+                val pcmFile = File(cacheDir, "user_speech.pcm")
+                val wavFile = File(cacheDir, "user_speech.wav")
+                val buffer = ShortArray(1024)
+
+                recorder.startRecording()
+                isRecording = true
+
+                var speechDetected = false
+                var silenceStartMs = System.currentTimeMillis()
+                val recordStartMs = System.currentTimeMillis()
+
+                FileOutputStream(pcmFile).use { fos ->
+                    while (isCallActive && isRecording) {
+                        val read = recorder.read(buffer, 0, buffer.size)
+                        if (read > 0) {
+                            var maxAmp = 0
+                            val byteBuf = ByteArray(read * 2)
+                            for (i in 0 until read) {
+                                val s = buffer[i].toInt()
+                                val absVal = kotlin.math.abs(s)
+                                if (absVal > maxAmp) maxAmp = absVal
+                                byteBuf[i * 2] = (s and 0x00FF).toByte()
+                                byteBuf[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
+                            }
+                            fos.write(byteBuf)
+
+                            if (maxAmp > 1300) { // 목소리 감지됨
+                                speechDetected = true
+                                silenceStartMs = System.currentTimeMillis()
+                            } else {
+                                val silentDuration = System.currentTimeMillis() - silenceStartMs
+                                // 말을 한 뒤 1.3초 동안 조용하면 말이 끝난 것으로 판단!
+                                if (speechDetected && silentDuration > 1300) break
+                                // 아무 말도 안 하고 6초가 지나면 다시 물어보기 위해 종료
+                                if (!speechDetected && (System.currentTimeMillis() - recordStartMs) > 6000) break
+                            }
+                        }
+                    }
+                }
+                recorder.stop()
+                recorder.release()
+                isRecording = false
+
+                if (!isCallActive) return@Thread
+
+                if (!speechDetected) {
+                    // 사용자가 아무 말도 안 했으면 다시 귀 기울이기
+                    recordAndRecognizeUserVoice(apiKey, voice, speed)
+                    return@Thread
+                }
+
+                pcmToWav(pcmFile, wavFile, sampleRate)
+                val userText = transcribeWithWhisper(apiKey, wavFile)
+
+                if (userText.isNotBlank() && isCallActive) {
+                    askGptAndSpeak(apiKey, userText, voice, speed)
+                } else if (isCallActive) {
+                    recordAndRecognizeUserVoice(apiKey, voice, speed)
+                }
+            } catch (e: Exception) {
+                if (isCallActive) {
+                    Thread.sleep(1000)
+                    recordAndRecognizeUserVoice(apiKey, voice, speed)
+                }
+            }
+        }.start()
+    }
+
+    private fun pcmToWav(pcmFile: File, wavFile: File, sampleRate: Int) {
+        val pcmData = pcmFile.readBytes()
+        val totalDataLen = pcmData.size + 36
+        val byteRate = sampleRate * 2
+        val header = ByteArray(44)
+        header[0] = 'R'.code.toByte(); header[1] = 'I'.code.toByte(); header[2] = 'F'.code.toByte(); header[3] = 'F'.code.toByte()
+        header[4] = (totalDataLen and 0xff).toByte(); header[5] = ((totalDataLen shr 8) and 0xff).toByte()
+        header[6] = ((totalDataLen shr 16) and 0xff).toByte(); header[7] = ((totalDataLen shr 24) and 0xff).toByte()
+        header[8] = 'W'.code.toByte(); header[9] = 'A'.code.toByte(); header[10] = 'V'.code.toByte(); header[11] = 'E'.code.toByte()
+        header[12] = 'f'.code.toByte(); header[13] = 'm'.code.toByte(); header[14] = 't'.code.toByte(); header[15] = ' '.code.toByte()
+        header[16] = 16; header[17] = 0; header[18] = 0; header[19] = 0
+        header[20] = 1; header[21] = 0; header[22] = 1; header[23] = 0
+        header[24] = (sampleRate and 0xff).toByte(); header[25] = ((sampleRate shr 8) and 0xff).toByte()
+        header[26] = ((sampleRate shr 16) and 0xff).toByte(); header[27] = ((sampleRate shr 24) and 0xff).toByte()
+        header[28] = (byteRate and 0xff).toByte(); header[29] = ((byteRate shr 8) and 0xff).toByte()
+        header[30] = ((byteRate shr 16) and 0xff).toByte(); header[31] = ((byteRate shr 24) and 0xff).toByte()
+        header[32] = 2; header[33] = 0; header[34] = 16; header[35] = 0
+        header[36] = 'd'.code.toByte(); header[37] = 'a'.code.toByte(); header[38] = 't'.code.toByte(); header[39] = 'a'.code.toByte()
+        header[40] = (pcmData.size and 0xff).toByte(); header[41] = ((pcmData.size shr 8) and 0xff).toByte()
+        header[42] = ((pcmData.size shr 16) and 0xff).toByte(); header[43] = ((pcmData.size shr 24) and 0xff).toByte()
+
+        FileOutputStream(wavFile).use {
+            it.write(header)
+            it.write(pcmData)
+        }
+    }
+
+    private fun transcribeWithWhisper(apiKey: String, wavFile: File): String {
+        return try {
+            val boundary = "----WebKitFormBoundary" + System.currentTimeMillis()
+            val url = URL("https://api.openai.com/v1/audio/transcriptions")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                setRequestProperty("Authorization", "Bearer $apiKey")
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+                doOutput = true
+            }
+            conn.outputStream.use { os ->
+                os.write("--$boundary\r\n".toByteArray())
+                os.write("Content-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n".toByteArray())
+                os.write("--$boundary\r\n".toByteArray())
+                os.write("Content-Disposition: form-data; name=\"language\"\r\n\r\nko\r\n".toByteArray())
+                os.write("--$boundary\r\n".toByteArray())
+                os.write("Content-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\n".toByteArray())
+                os.write("Content-Type: audio/wav\r\n\r\n".toByteArray())
+                os.write(wavFile.readBytes())
+                os.write("\r\n--$boundary--\r\n".toByteArray())
+            }
+            val resp = conn.inputStream.bufferedReader().readText()
+            JSONObject(resp).optString("text", "").trim()
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    private fun askGptAndSpeak(apiKey: String, userText: String, voice: String, speed: Double) {
+        if (!isCallActive) return
+        Thread {
+            try {
+                chatHistory.put(JSONObject().put("role", "user").put("content", userText))
                 val url = URL("https://api.openai.com/v1/chat/completions")
                 val conn = (url.openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
@@ -743,70 +865,68 @@ class FakeCallService : ConnectionService() {
                     setRequestProperty("Content-Type", "application/json")
                     doOutput = true
                 }
-
-                val reqBody = JSONObject().apply {
+                val body = JSONObject().apply {
                     put("model", "gpt-4o-mini")
                     put("messages", chatHistory)
-                    put("max_tokens", 120)
+                    put("max_tokens", 100)
+                    put("temperature", 0.7)
                 }
-                conn.outputStream.use { it.write(reqBody.toString().toByteArray(Charsets.UTF_8)) }
+                conn.outputStream.use { it.write(body.toString().toByteArray()) }
+                val respStr = conn.inputStream.bufferedReader().readText()
+                val reply = JSONObject(respStr).getJSONArray("choices")
+                    .getJSONObject(0).getJSONObject("message").getString("content").trim()
 
-                val resStr = conn.inputStream.bufferedReader().use { it.readText() }
-                val reply = JSONObject(resStr)
-                    .getJSONArray("choices")
-                    .getJSONObject(0)
-                    .getJSONObject("message")
-                    .getString("content")
-
-                chatHistory.put(JSONObject().apply {
-                    put("role", "assistant")
-                    put("content", reply)
-                })
+                chatHistory.put(JSONObject().put("role", "assistant").put("content", reply))
 
                 if (isCallActive) {
-                    speakWithOpenAi(apiKey, voice, reply) {
-                        listenUserReply(apiKey, voice)
+                    val replyAudio = downloadTtsFile(apiKey, reply, voice, speed, "ai_reply.mp3")
+                    if (replyAudio != null && isCallActive) {
+                        playAudioFile(replyAudio) {
+                            if (isCallActive) recordAndRecognizeUserVoice(apiKey, voice, speed)
+                        }
                     }
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) {
+                if (isCallActive) recordAndRecognizeUserVoice(apiKey, voice, speed)
+            }
         }.start()
     }
 
     private fun stopAiAndCleanUp() {
         isCallActive = false
+        isRecording = false
         clearWatchAlert()
         mainHandler.post {
             try { mediaPlayer?.stop(); mediaPlayer?.release(); mediaPlayer = null } catch (e: Exception) {}
-            try { speechRecognizer?.destroy(); speechRecognizer = null } catch (e: Exception) {}
         }
     }
 
     private fun ensureContactForCallLog(name: String, number: String) {
         try {
             val lookupUri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
-            contentResolver.query(lookupUri, arrayOf(ContactsContract.PhoneLookup.CONTACT_ID), null, null, null)?.use { c ->
+            contentResolver.query(lookupUri, arrayOf(ContactsContract.PhoneLookup._ID), null, null, null)?.use { c ->
                 while (c.moveToNext()) {
-                    contentResolver.delete(
-                        ContactsContract.RawContacts.CONTENT_URI,
-                        "${ContactsContract.RawContacts.CONTACT_ID}=?",
-                        arrayOf(c.getLong(0).toString())
-                    )
+                    val id = c.getLong(0)
+                    contentResolver.delete(ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, id), null, null)
                 }
             }
             val rawUri = contentResolver.insert(ContactsContract.RawContacts.CONTENT_URI, ContentValues())
             val rawId = ContentUris.parseId(rawUri ?: return)
 
-            contentResolver.insert(ContactsContract.Data.CONTENT_URI, ContentValues().apply {
+            val nameCv = ContentValues().apply {
                 put(ContactsContract.Data.RAW_CONTACT_ID, rawId)
                 put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE)
                 put(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, name)
-            })
-            contentResolver.insert(ContactsContract.Data.CONTENT_URI, ContentValues().apply {
+            }
+            contentResolver.insert(ContactsContract.Data.CONTENT_URI, nameCv)
+
+            val phoneCv = ContentValues().apply {
                 put(ContactsContract.Data.RAW_CONTACT_ID, rawId)
                 put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE)
                 put(ContactsContract.CommonDataKinds.Phone.NUMBER, number)
                 put(ContactsContract.CommonDataKinds.Phone.TYPE, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
-            })
+            }
+            contentResolver.insert(ContactsContract.Data.CONTENT_URI, phoneCv)
         } catch (e: Exception) {}
     }
 
@@ -814,20 +934,20 @@ class FakeCallService : ConnectionService() {
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val ch = NotificationChannel(CH_ID, "수신전화", NotificationManager.IMPORTANCE_HIGH).apply {
+                val ch = NotificationChannel(CH_ID, "Call", NotificationManager.IMPORTANCE_HIGH).apply {
                     enableVibration(true)
                     vibrationPattern = longArrayOf(0, 1000, 500, 1000)
                 }
                 nm.createNotificationChannel(ch)
             }
-            val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(this, CH_ID)
-            else @Suppress("DEPRECATION") Notification.Builder(this)
-
+            val pi = PendingIntent.getActivity(this, 0, Intent(), PendingIntent.FLAG_IMMUTABLE)
+            val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(this, CH_ID) else Notification.Builder(this)
             b.setSmallIcon(android.R.drawable.sym_action_call)
                 .setContentTitle(name)
                 .setContentText("수신전화")
                 .setCategory(Notification.CATEGORY_CALL)
                 .setOngoing(true)
+                .setFullScreenIntent(pi, true)
             nm.notify(NOTIF_ID, b.build())
         } catch (e: Exception) {}
     }
@@ -839,4 +959,6 @@ class FakeCallService : ConnectionService() {
         } catch (e: Exception) {}
     }
 }
+
+
 
