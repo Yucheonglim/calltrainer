@@ -1,16 +1,41 @@
 package com.company.calltrainer
 
-import android.Manifest
-import android.app.*
-import android.content.*
-import android.graphics.*
+import android.app.Activity
+import android.app.AlarmManager
+import android.app.KeyguardManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.ComponentName
+import android.content.ContentUris
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.media.*
+import android.media.AudioAttributes
+import android.media.MediaPlayer
 import android.net.Uri
-import android.os.*
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.provider.ContactsContract
-import android.speech.*
-import android.telecom.*
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.telecom.Connection
+import android.telecom.ConnectionRequest
+import android.telecom.ConnectionService
+import android.telecom.DisconnectCause
+import android.telecom.PhoneAccount
+import android.telecom.PhoneAccountHandle
+import android.telecom.TelecomManager
 import android.view.Gravity
 import android.view.View
 import android.widget.*
@@ -20,8 +45,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
-import java.text.SimpleDateFormat
-import java.util.*
 
 class MainActivity : Activity() {
     private lateinit var telecomManager: TelecomManager
@@ -30,316 +53,464 @@ class MainActivity : Activity() {
     private lateinit var numberInput: EditText
     private lateinit var promptInput: EditText
     private lateinit var apiKeyInput: EditText
-    private lateinit var mainScrollView: ScrollView
-    private lateinit var scheduleStatusText: TextView
-    private lateinit var cancelScheduleBtn: Button
+    private lateinit var statusBox: LinearLayout
+    private lateinit var statusText: TextView
     private lateinit var aiConfigBox: LinearLayout
-    private val uiTimerHandler = Handler(Looper.getMainLooper())
+    private var selectedDelayMs: Long = 5000L
+    private var useAiMode: Boolean = false
+    private var selectedVoice: String = "onyx"
+    private var selectedSpeed: Double = 1.0
+    private val PICK_CONTACT_REQUEST = 1001
     private val AUTH_REQUEST_CODE = 5555
     private var isUnlocked = false
-    private var targetRingTimeMillis = 0L
-    private var scheduledName = ""
-    private var scheduledNumber = ""
+    private lateinit var mainScrollView: ScrollView
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private var targetRingTimeMs: Long = 0L
+
+    private val voiceButtons = mutableListOf<Button>()
+    private val presetButtons = mutableListOf<Button>()
+
+    private val countdownRunnable = object : Runnable {
+        override fun run() {
+            val remainMs = targetRingTimeMs - System.currentTimeMillis()
+            if (remainMs > 0) {
+                val totalSec = (remainMs / 1000) + 1
+                val min = totalSec / 60
+                val sec = totalSec % 60
+                val timeStr = if (min > 0) "${min}분 ${sec}초" else "${sec}초"
+                val savedName = getSharedPreferences("TeamCallPrefs", Context.MODE_PRIVATE).getString("TARGET_NAME", "")
+                val modeStr = if (useAiMode) "🤖 AI통화($selectedVoice)" else "🔕 벨소리만"
+                statusText.text = "⏰ 예약됨: $savedName ($modeStr)\n⏳ 벨 울림까지 남은 시간: $timeStr"
+                uiHandler.postDelayed(this, 500)
+            } else {
+                statusBox.visibility = View.GONE
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val prefs = getSharedPreferences("TeamCallPrefs", Context.MODE_PRIVATE)
-
         val perms = mutableListOf(
-            Manifest.permission.READ_CONTACTS,
-            Manifest.permission.WRITE_CONTACTS,
-            Manifest.permission.READ_PHONE_STATE,
-            Manifest.permission.RECORD_AUDIO
+            android.Manifest.permission.READ_CONTACTS,
+            android.Manifest.permission.WRITE_CONTACTS,
+            android.Manifest.permission.READ_PHONE_STATE,
+            android.Manifest.permission.RECORD_AUDIO
         )
-        if (Build.VERSION.SDK_INT >= 33) perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (Build.VERSION.SDK_INT >= 33) perms.add(android.Manifest.permission.POST_NOTIFICATIONS)
         requestPermissions(perms.toTypedArray(), 3000)
 
         telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-        phoneAccountHandle = PhoneAccountHandle(ComponentName(this, FakeCallService::class.java), "HD_Voice_Trainer")
-        val phoneAccount = PhoneAccount.builder(phoneAccountHandle, "HD Voice")
-            .setCapabilities(PhoneAccount.CAPABILITY_CALL_PROVIDER)
-            .build()
-        telecomManager.registerPhoneAccount(phoneAccount)
+        val componentName = ComponentName(this, FakeCallService::class.java)
+        phoneAccountHandle = PhoneAccountHandle(componentName, "HD_Voice_Trainer")
+
+        try {
+            val builder = PhoneAccount.builder(phoneAccountHandle, "HD Voice")
+                .setCapabilities(PhoneAccount.CAPABILITY_CALL_PROVIDER)
+            telecomManager.registerPhoneAccount(builder.build())
+        } catch (e: Exception) {}
+
+        val prefs = getSharedPreferences("TeamCallPrefs", Context.MODE_PRIVATE)
 
         mainScrollView = ScrollView(this).apply {
             setBackgroundColor(Color.parseColor("#F4F6F9"))
+            isFillViewport = true
             visibility = View.INVISIBLE
         }
-
-        val mainLayout = LinearLayout(this).apply {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(50, 80, 50, 80)
+            setPadding(50, 60, 50, 60)
         }
 
-        mainLayout.addView(TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "🔒 Team Call : Secure Line"
             textSize = 23f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(Color.parseColor("#1A1A1A"))
-            setPadding(10, 0, 0, 50)
+            setTextColor(Color.parseColor("#1A237E"))
+            setPadding(0, 0, 0, 35)
         })
 
-        // 1. 연락처 입력 카드
-        val step1Card = createCard()
-        step1Card.addView(Button(this).apply {
-            text = "📒 연락처 불러오기"
+        val card1 = makeCard()
+        card1.addView(Button(this).apply {
+            text = "📒 내 연락처에서 상대방 불러오기"
             textSize = 15f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#1565C0"))
-            background = roundBg("#E3F2FD", 24f)
+            background = makeRoundBg("#E3F2FD", 24f)
             setPadding(20, 30, 20, 30)
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 25) }
             setOnClickListener {
-                startActivityForResult(Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI), 1001)
+                val intent = Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI)
+                startActivityForResult(intent, PICK_CONTACT_REQUEST)
             }
         })
-
         nameInput = EditText(this).apply {
-            hint = "이름 입력"
-            setText("대표회계사")
+            hint = "발신자 이름"
+            setText("대한건설 김철수 소장")
             textSize = 16f
             setPadding(35, 30, 35, 30)
-            background = roundBg("#F8F9FA", 16f)
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 20) }
+            background = makeRoundBg("#F1F3F5", 20f)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 25, 0, 15) }
         }
+        card1.addView(nameInput)
         numberInput = EditText(this).apply {
-            hint = "전화번호 입력"
+            hint = "전화번호"
             setText("010-9876-5432")
             textSize = 16f
             setPadding(35, 30, 35, 30)
-            background = roundBg("#F8F9FA", 16f)
+            background = makeRoundBg("#F1F3F5", 20f)
         }
-        step1Card.addView(nameInput)
-        step1Card.addView(numberInput)
-        mainLayout.addView(step1Card)
+        card1.addView(numberInput)
+        root.addView(card1)
 
-        // 2. 시간 선택 + [벨소리만 vs AI 목소리] 선택 카드
-        val step2Card = createCard()
-        val timeGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            gravity = Gravity.CENTER
-            addView(createRadio(101, "5초", true))
-            addView(createRadio(102, "15초", false))
-            addView(createRadio(103, "1분", false))
-            addView(createRadio(104, "5분", false))
+        val card2 = makeCard()
+        val rg = RadioGroup(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            weightSum = 4f
         }
-        step2Card.addView(timeGroup)
+        val times = listOf("5초" to 5000L, "15초" to 15000L, "1분" to 60000L, "5분" to 300000L)
+        times.forEachIndexed { idx, pair ->
+            val rb = RadioButton(this).apply {
+                text = pair.first
+                textSize = 15f
+                id = 101 + idx
+                isChecked = (idx == 0)
+                layoutParams = RadioGroup.LayoutParams(0, -2, 1f)
+            }
+            rg.addView(rb)
+        }
+        rg.setOnCheckedChangeListener { _, id ->
+            selectedDelayMs = when (id) {
+                101 -> 5000L; 102 -> 15000L; 103 -> 60000L; 104 -> 300000L; else -> 5000L
+            }
+        }
+        card2.addView(rg)
+        root.addView(card2)
 
-        // [신규 추가!] 벨소리만 울릴지, AI 사람 목소리가 나올지 선택하는 스위치
+        val cardAi = makeCard()
         val modeGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            gravity = Gravity.CENTER
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 30, 0, 0) }
-            addView(createRadio(201, "🔕 벨소리만", true))
-            addView(createRadio(202, "🤖 AI 음성통화", false))
+            orientation = LinearLayout.HORIZONTAL
+            weightSum = 2f
         }
-        step2Card.addView(modeGroup)
+        val rbSilent = RadioButton(this).apply {
+            text = "🔕 벨소리만"
+            textSize = 15f
+            id = 201
+            isChecked = true
+            layoutParams = RadioGroup.LayoutParams(0, -2, 1f)
+        }
+        val rbAi = RadioButton(this).apply {
+            text = "🤖 AI 음성통화"
+            textSize = 15f
+            id = 202
+            layoutParams = RadioGroup.LayoutParams(0, -2, 1f)
+        }
+        modeGroup.addView(rbSilent)
+        modeGroup.addView(rbAi)
+        cardAi.addView(modeGroup)
 
-        // [AI 음성통화 선택 시 나타나는 세부 설정창]
         aiConfigBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 25, 0, 0) }
+            setPadding(0, 25, 0, 0)
         }
 
-        val voiceGroup = RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            gravity = Gravity.CENTER
-            addView(createRadio(301, "👔 중년 남성(Onyx)", true))
-            addView(createRadio(302, "👩 차분한 여성(Nova)", false))
+        aiConfigBox.addView(TextView(this).apply {
+            text = "🎙️ 성우 목소리 선택 (남성 3명 / 여성 3명)"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#37474F"))
+            setPadding(0, 0, 0, 12)
+        })
+
+        val voices = listOf(
+            Triple("👔 중후한 남성(임원)", "onyx", 1.0),
+            Triple("🏃 젊은 남성(실무자)", "echo", 1.1),
+            Triple("👓 차분한 남성(지적)", "alloy", 1.0),
+            Triple("👩‍💼 차분한 여성(비서)", "nova", 1.0),
+            Triple("👩‍⚖️ 부드러운 여성(대표)", "shimmer", 1.0),
+            Triple("⚡ 깐깐한 여성(구매팀)", "fable", 1.12)
+        )
+
+        for (row in 0..2) {
+            val rowLayout = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                weightSum = 2f
+                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 12) }
+            }
+            for (col in 0..1) {
+                val idx = row * 2 + col
+                val vInfo = voices[idx]
+                val btn = Button(this).apply {
+                    text = vInfo.first
+                    textSize = 12.5f
+                    setAllCaps(false)
+                    setPadding(10, 22, 10, 22)
+                    layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply {
+                        if (col == 0) setMargins(0, 0, 8, 0) else setMargins(8, 0, 0, 0)
+                    }
+                    setOnClickListener {
+                        selectedVoice = vInfo.second
+                        selectedSpeed = vInfo.third
+                        updateVoiceSelection(this)
+                    }
+                }
+                voiceButtons.add(btn)
+                rowLayout.addView(btn)
+            }
+            aiConfigBox.addView(rowLayout)
         }
+        updateVoiceSelection(voiceButtons[0])
+
+        aiConfigBox.addView(TextView(this).apply {
+            text = "🎬 원터치 상황 설정 (누르면 아래 대사가 자동 변경됨)"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#37474F"))
+            setPadding(0, 20, 0, 12)
+        })
+
+        val presets = listOf(
+            "🏗️ 김법무 건설현장 보고" to "대표님, 김법무입니다! 지금 현장 실사 끝났습니다. 일단 보고서에 있던 것 처럼 큰문제는 아닌듯 합니다. 추락방지 레이어를 단단히 고정하지 않아서 빠진것 같고 현장사진으로 설명하면 될듯 합니다. ",
+            "🔬 반도체 납기항의" to "안녕하세요? 대표님 마크나칩 김성철 이사입니다. 인수진행을 언제부터 하실지 궁금해서 연락 드립니다.",
+            "💼 M&A 긴급협상" to "대표님, 노무라증권 이사입니다. 아까 말씀드린데로 안성건은 대표님이 잘 그려주시고 저희는 총알만 충문히 준비하겠습니다.",
+            "😡 회계사" to "대표님, 회계사입니다. 홈플러스 말씀하신것 처럼 움직임이 있습니다. 정말 혜안이~  이젠 존경 합니다.  ",
+            "📢 회계사 사무원여" to "대표님, 오늘 건설사 인수의향서 자서문제로 대표들 모임이 있습니다. 아시죠? 혹시나 해서 연락드립니다.  "
+        )
+
+        val presetGrid1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; weightSum = 3f }
+        val presetGrid2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; weightSum = 2f; setPadding(0, 10, 0, 15) }
+
+        presets.forEachIndexed { i, pair ->
+            val pBtn = Button(this).apply {
+                text = pair.first
+                textSize = 12f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.parseColor("#0D47A1"))
+                background = makeRoundBg("#E3F2FD", 16f)
+                setPadding(8, 20, 8, 20)
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(4, 0, 4, 0) }
+                setOnClickListener {
+                    promptInput.setText(pair.second)
+                    Toast.makeText(this@MainActivity, "[${pair.first}] 시나리오가 세팅되었습니다.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            if (i < 3) presetGrid1.addView(pBtn) else presetGrid2.addView(pBtn)
+        }
+        aiConfigBox.addView(presetGrid1)
+        aiConfigBox.addView(presetGrid2)
+
+        aiConfigBox.addView(TextView(this).apply {
+            text = "✏️ AI 첫마디 및 상황 대본 (자유롭게 수정 가능)"
+            textSize = 13f
+            setTextColor(Color.parseColor("#546E7A"))
+            setPadding(0, 5, 0, 8)
+        })
 
         promptInput = EditText(this).apply {
-            hint = "AI가 전화 받자마자 할 첫마디 또는 상황 입력"
-            setText(prefs.getString("SAVED_PROMPT", "안녕하세요, 대표님 박입니다. 건설사 감사 결제때문에 연락드렸습니다."))
+            hint = "AI가 전화를 받자마자 할 첫마디와 상황을 자유롭게 적어주세요."
+            setText(prefs.getString("SAVED_PROMPT", presets[2].second))
             textSize = 14f
+            minLines = 3
             setPadding(30, 25, 30, 25)
-            background = roundBg("#F8F9FA", 16f)
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 15, 0, 15) }
+            background = makeRoundBg("#F1F3F5", 20f)
         }
+        aiConfigBox.addView(promptInput)
 
         apiKeyInput = EditText(this).apply {
-            hint = "OpenAI API 키 입력 (sk-... 한 번만 입력하면 자동저장)"
+            hint = "OpenAI API 키 입력 (sk-proj-...)"
             setText(prefs.getString("OPENAI_KEY", ""))
             textSize = 13f
             setPadding(30, 25, 30, 25)
-            background = roundBg("#FFF8E1", 16f)
+            background = makeRoundBg("#FFF8E1", 20f)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 15, 0, 0) }
         }
-
-        aiConfigBox.addView(voiceGroup)
-        aiConfigBox.addView(promptInput)
         aiConfigBox.addView(apiKeyInput)
-        step2Card.addView(aiConfigBox)
+        cardAi.addView(aiConfigBox)
+        root.addView(cardAi)
 
-        modeGroup.setOnCheckedChangeListener { _, checkedId ->
-            aiConfigBox.visibility = if (checkedId == 202) View.VISIBLE else View.GONE
+        modeGroup.setOnCheckedChangeListener { _, id ->
+            useAiMode = (id == 202)
+            aiConfigBox.visibility = if (useAiMode) View.VISIBLE else View.GONE
         }
 
-        mainLayout.addView(step2Card)
+        statusBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = makeRoundBg("#FFF3E0", 24f)
+            setPadding(40, 35, 40, 35)
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 30) }
+        }
+        statusText = TextView(this).apply {
+            textSize = 15f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#E65100"))
+        }
+        val cancelBtn = Button(this).apply {
+            text = "❌ 예약된 전화 취소하기"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            background = makeRoundBg("#D32F2F", 16f)
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 20, 0, 0) }
+            setOnClickListener { cancelScheduledCall() }
+        }
+        statusBox.addView(statusText)
+        statusBox.addView(cancelBtn)
+        root.addView(statusBox)
 
-        // 3. 실행 버튼 및 스케줄러 표시창 카드
-        val step3Card = createCard()
-        step3Card.addView(Button(this).apply {
+        root.addView(Button(this).apply {
             text = "START SECURE CALL"
-            textSize = 17f
+            textSize = 18f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.WHITE)
-            background = roundBg("#1976D2", 28f)
-            setPadding(20, 40, 20, 40)
+            background = makeRoundBg("#1E88E5", 30f)
+            setPadding(20, 45, 20, 45)
             setOnClickListener {
-                val name = nameInput.text.toString().ifBlank { "Unknown" }
-                val number = numberInput.text.toString().ifBlank { "010-0000-0000" }
-                val useAi = (modeGroup.checkedRadioButtonId == 202)
-                val voiceType = if (voiceGroup.checkedRadioButtonId == 301) "onyx" else "nova"
-                val promptTxt = promptInput.text.toString().ifBlank { "여보세요, 통화 가능하십니까?" }
-                val apiKeyTxt = apiKeyInput.text.toString().trim()
-
-                if (useAi && apiKeyTxt.isEmpty()) {
-                    Toast.makeText(context, "AI 통화를 위해 OpenAI API 키(sk-...)를 입력해 주세요!", Toast.LENGTH_LONG).show()
+                val n = nameInput.text.toString().ifEmpty { "알 수 없음" }
+                val p = numberInput.text.toString().ifEmpty { "010-0000-0000" }
+                if (useAiMode && apiKeyInput.text.toString().trim().isEmpty()) {
+                    Toast.makeText(this@MainActivity, "AI 통화를 위해 OpenAI API 키를 입력해 주세요!", Toast.LENGTH_LONG).show()
                     return@setOnClickListener
                 }
-
-                // 입력한 API 키와 대사는 다음번에 또 치지 않게 자동 저장!
                 prefs.edit()
-                    .putString("OPENAI_KEY", apiKeyTxt)
-                    .putString("SAVED_PROMPT", promptTxt)
-                    .putBoolean("USE_AI", useAi)
-                    .putString("VOICE_TYPE", voiceType)
+                    .putString("OPENAI_KEY", apiKeyInput.text.toString().trim())
+                    .putString("SAVED_PROMPT", promptInput.text.toString().trim())
+                    .putBoolean("USE_AI", useAiMode)
+                    .putString("VOICE_TYPE", selectedVoice)
+                    .putFloat("VOICE_SPEED", selectedSpeed.toFloat())
                     .apply()
-
-                val delay = when (timeGroup.checkedRadioButtonId) {
-                    101 -> 5000L
-                    102 -> 15000L
-                    103 -> 60000L
-                    104 -> 300000L
-                    else -> 5000L
-                }
-                scheduleExactCall(name, number, delay)
+                scheduleExactCall(n, p, selectedDelayMs)
             }
         })
 
-        scheduleStatusText = TextView(this).apply {
-            text = "📅 예약된 콜 내역이 없습니다."
-            textSize = 14f
-            setTextColor(Color.parseColor("#555555"))
-            background = roundBg("#F1F5F9", 20f)
-            setPadding(35, 35, 35, 35)
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 30, 0, 0) }
-        }
-
-        cancelScheduleBtn = Button(this).apply {
-            text = "예약 취소"
+        root.addView(TextView(this).apply {
+            text = "전화가 안 된다면 아래 버튼을 눌러서 'HD Voice'를 켜주세요."
             textSize = 13f
-            setTextColor(Color.parseColor("#D32F2F"))
-            background = roundBg("#FFEBEE", 18f)
-            visibility = View.GONE
-            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 15, 0, 0) }
-            setOnClickListener { cancelScheduledCall() }
-        }
-
-        step3Card.addView(scheduleStatusText)
-        step3Card.addView(cancelScheduleBtn)
-        mainLayout.addView(step3Card)
-
-        // 4. 하단 통화 허용 설정 카드
-        val setCard = createCard()
-        setCard.addView(TextView(this).apply {
-            text = "전화가 안된다면 아래 버튼을 눌러서 'HD Voice' 스위치를 켜주세요."
-            textSize = 13f
-            setTextColor(Color.parseColor("#666666"))
-            setPadding(5, 0, 5, 25)
+            setTextColor(Color.parseColor("#757575"))
+            gravity = Gravity.CENTER
+            setPadding(0, 60, 0, 15)
         })
-        setCard.addView(Button(this).apply {
-            text = "통화 허용 설정"
+
+        root.addView(Button(this).apply {
+            text = "⚙️ 통화 허용 설정"
             textSize = 14f
-            setTextColor(Color.parseColor("#333333"))
-            background = roundBg("#E0E0E0", 20f)
-            setOnClickListener { startActivity(Intent(TelecomManager.ACTION_CHANGE_PHONE_ACCOUNTS)) }
+            background = makeRoundBg("#E0E0E0", 20f)
+            setOnClickListener {
+                startActivity(Intent(TelecomManager.ACTION_CHANGE_PHONE_ACCOUNTS))
+            }
         })
-        mainLayout.addView(setCard)
 
-        mainScrollView.addView(mainLayout)
+        mainScrollView.addView(root)
         setContentView(mainScrollView)
-
+        checkExistingSchedule()
         checkFingerprintOnce()
     }
 
-    private fun scheduleExactCall(name: String, number: String, delayMillis: Long) {
-        cancelScheduledCall(showToast = false)
-        scheduledName = name
-        scheduledNumber = number
-        targetRingTimeMillis = System.currentTimeMillis() + delayMillis
+    private fun updateVoiceSelection(selectedBtn: Button) {
+        voiceButtons.forEach { btn ->
+            if (btn == selectedBtn) {
+                btn.background = makeRoundBg("#1565C0", 18f)
+                btn.setTextColor(Color.WHITE)
+                btn.setTypeface(null, Typeface.BOLD)
+            } else {
+                btn.background = makeRoundBg("#ECEFF1", 18f)
+                btn.setTextColor(Color.parseColor("#455A64"))
+                btn.setTypeface(null, Typeface.NORMAL)
+            }
+        }
+    }
 
-        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    private fun scheduleExactCall(name: String, number: String, delayMs: Long) {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(this, AlarmCallReceiver::class.java).apply {
             putExtra("CALLER_NAME", name)
             putExtra("CALLER_NUMBER", number)
         }
-        val pi = PendingIntent.getBroadcast(this, 777, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        am.setAlarmClock(AlarmManager.AlarmClockInfo(targetRingTimeMillis, pi), pi)
+        val pi = PendingIntent.getBroadcast(
+            this, 777, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        targetRingTimeMs = System.currentTimeMillis() + delayMs
 
-        cancelScheduleBtn.visibility = View.VISIBLE
-        startCountdownUi()
-        Toast.makeText(this, "콜 스케줄이 등록되었습니다.", Toast.LENGTH_SHORT).show()
+        getSharedPreferences("TeamCallPrefs", Context.MODE_PRIVATE).edit()
+            .putLong("RING_TIME", targetRingTimeMs)
+            .putString("TARGET_NAME", name)
+            .apply()
+
+        val clockInfo = AlarmManager.AlarmClockInfo(targetRingTimeMs, pi)
+        alarmManager.setAlarmClock(clockInfo, pi)
+
+        statusBox.visibility = View.VISIBLE
+        uiHandler.removeCallbacks(countdownRunnable)
+        uiHandler.post(countdownRunnable)
+        Toast.makeText(this, "스케줄러에 전화가 등록되었습니다.", Toast.LENGTH_SHORT).show()
     }
 
-    private fun cancelScheduledCall(showToast: Boolean = true) {
-        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val pi = PendingIntent.getBroadcast(this, 777, Intent(this, AlarmCallReceiver::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        am.cancel(pi)
-        uiTimerHandler.removeCallbacksAndMessages(null)
-        targetRingTimeMillis = 0L
-        scheduleStatusText.text = "📅 예약된 콜 내역이 없습니다."
-        scheduleStatusText.setTextColor(Color.parseColor("#555555"))
-        cancelScheduleBtn.visibility = View.GONE
-        if (showToast) Toast.makeText(this, "예약된 콜이 취소되었습니다.", Toast.LENGTH_SHORT).show()
+    private fun cancelScheduledCall() {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(this, AlarmCallReceiver::class.java)
+        val pi = PendingIntent.getBroadcast(
+            this, 777, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        alarmManager.cancel(pi)
+        targetRingTimeMs = 0L
+        getSharedPreferences("TeamCallPrefs", Context.MODE_PRIVATE).edit().putLong("RING_TIME", 0L).apply()
+        uiHandler.removeCallbacks(countdownRunnable)
+        statusBox.visibility = View.GONE
+        Toast.makeText(this, "예약된 전화가 취소되었습니다.", Toast.LENGTH_SHORT).show()
     }
 
-    private fun startCountdownUi() {
-        val targetTimeStr = SimpleDateFormat("a h:mm:ss", Locale.KOREA).format(Date(targetRingTimeMillis))
-        uiTimerHandler.post(object : Runnable {
-            override fun run() {
-                val remain = targetRingTimeMillis - System.currentTimeMillis()
-                if (remain <= 0L) {
-                    scheduleStatusText.text = "✅ [$scheduledName] 콜 발신 완료!"
-                    scheduleStatusText.setTextColor(Color.parseColor("#2E7D32"))
-                    cancelScheduleBtn.visibility = View.GONE
-                    return
-                }
-                val totalSec = (remain / 1000) + 1
-                val remainStr = if (totalSec / 60 > 0) "${totalSec / 60}분 ${totalSec % 60}초 후" else "${totalSec % 60}초 후"
-                scheduleStatusText.text = "📌 예약 대상: $scheduledName ($scheduledNumber)\n⏰ 예정 시각: $targetTimeStr ($remainStr 콜 도착)"
-                scheduleStatusText.setTextColor(Color.parseColor("#1565C0"))
-                uiTimerHandler.postDelayed(this, 500)
-            }
-        })
+    private fun checkExistingSchedule() {
+        val prefs = getSharedPreferences("TeamCallPrefs", Context.MODE_PRIVATE)
+        val savedTime = prefs.getLong("RING_TIME", 0L)
+        if (savedTime > System.currentTimeMillis()) {
+            targetRingTimeMs = savedTime
+            statusBox.visibility = View.VISIBLE
+            uiHandler.removeCallbacks(countdownRunnable)
+            uiHandler.post(countdownRunnable)
+        }
     }
 
     private fun checkFingerprintOnce() {
-        if (isUnlocked) { mainScrollView.visibility = View.VISIBLE; return }
+        if (isUnlocked) {
+            mainScrollView.visibility = View.VISIBLE
+            return
+        }
         val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         if (km.isKeyguardSecure) {
-            @Suppress("DEPRECATION")
-            val authIntent = km.createConfirmDeviceCredentialIntent("🔒 팀전화 보안 인증", "지문을 인식해 주세요.")
-            if (authIntent != null) startActivityForResult(authIntent, AUTH_REQUEST_CODE)
-            else { isUnlocked = true; mainScrollView.visibility = View.VISIBLE }
-        } else { isUnlocked = true; mainScrollView.visibility = View.VISIBLE }
+            val intent = km.createConfirmDeviceCredentialIntent("🔒 팀전화 보안 인증", "지문을 인식해 주세요.")
+            if (intent != null) {
+                startActivityForResult(intent, AUTH_REQUEST_CODE)
+            } else {
+                isUnlocked = true
+                mainScrollView.visibility = View.VISIBLE
+            }
+        } else {
+            isUnlocked = true
+            mainScrollView.visibility = View.VISIBLE
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == AUTH_REQUEST_CODE) {
-            if (resultCode == RESULT_OK) { isUnlocked = true; mainScrollView.visibility = View.VISIBLE } else finish()
+            if (resultCode == Activity.RESULT_OK) {
+                isUnlocked = true
+                mainScrollView.visibility = View.VISIBLE
+            } else {
+                finish()
+            }
             return
         }
-        if (requestCode == 1001 && resultCode == RESULT_OK) {
-            val uri = data?.data ?: return
-            val proj = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER)
-            contentResolver.query(uri, proj, null, null, null)?.use { c ->
-                if (c.moveToFirst()) {
-                    nameInput.setText(c.getString(0) ?: "")
-                    numberInput.setText(formatNum(c.getString(1) ?: ""))
+        if (requestCode == PICK_CONTACT_REQUEST && resultCode == Activity.RESULT_OK) {
+            data?.data?.let { uri ->
+                contentResolver.query(uri, null, null, null, null)?.use { c ->
+                    if (c.moveToFirst()) {
+                        val nIdx = c.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                        val pIdx = c.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                        if (nIdx >= 0) nameInput.setText(c.getString(nIdx))
+                        if (pIdx >= 0) numberInput.setText(formatNum(c.getString(pIdx)))
+                    }
                 }
             }
         }
@@ -347,51 +518,48 @@ class MainActivity : Activity() {
 
     private fun formatNum(raw: String): String {
         val d = raw.replace(Regex("[^0-9]"), "")
-        return when (d.length) {
-            11 -> "${d.substring(0, 3)}-${d.substring(3, 7)}-${d.substring(7, 11)}"
-            10 -> "${d.substring(0, 3)}-${d.substring(3, 6)}-${d.substring(6, 10)}"
+        return when {
+            d.length == 11 -> "${d.substring(0, 3)}-${d.substring(3, 7)}-${d.substring(7)}"
+            d.length == 10 -> "${d.substring(0, 3)}-${d.substring(3, 6)}-${d.substring(6)}"
             else -> raw
         }
     }
 
-    private fun createRadio(idVal: Int, txt: String, chk: Boolean) = RadioButton(this).apply {
-        id = idVal; text = txt; textSize = 14f; isChecked = chk
-        layoutParams = RadioGroup.LayoutParams(0, -2, 1f)
-    }
-
-    private fun createCard() = LinearLayout(this).apply {
+    private fun makeCard() = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
+        background = makeRoundBg("#FFFFFF", 32f)
         setPadding(45, 45, 45, 45)
-        background = roundBg("#FFFFFF", 32f)
+        elevation = 6f
         layoutParams = LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 35) }
-        elevation = 4f
     }
 
-    private fun roundBg(hex: String, r: Float) = GradientDrawable().apply {
-        setColor(Color.parseColor(hex)); cornerRadius = r
+    private fun makeRoundBg(hex: String, r: Float) = GradientDrawable().apply {
+        setColor(Color.parseColor(hex))
+        cornerRadius = r
     }
 }
 
 class AlarmCallReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-        @Suppress("DEPRECATION")
-        val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "TeamCall:Wake")
+        val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TeamCall:AlarmWakeLock")
         wl.acquire(10000L)
 
-        val name = intent.getStringExtra("CALLER_NAME") ?: "Unknown"
+        val name = intent.getStringExtra("CALLER_NAME") ?: "알 수 없음"
         val number = intent.getStringExtra("CALLER_NUMBER") ?: "010-0000-0000"
+
+        val tm = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+        val handle = PhoneAccountHandle(ComponentName(context, FakeCallService::class.java), "HD_Voice_Trainer")
+        val extras = Bundle().apply {
+            putString("CALLER_NAME", name)
+            putString("CALLER_NUMBER", number)
+        }
         try {
-            val tm = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-            val handle = PhoneAccountHandle(ComponentName(context, FakeCallService::class.java), "HD_Voice_Trainer")
-            val extras = Bundle().apply {
-                putString("CALLER_NAME", name)
-                putString("CALLER_NUMBER", number)
-            }
             tm.addNewIncomingCall(handle, extras)
         } catch (e: Exception) {}
     }
 }
+
 
 
 
