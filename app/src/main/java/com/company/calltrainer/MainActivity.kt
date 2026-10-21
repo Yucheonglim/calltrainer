@@ -336,7 +336,12 @@ class AlarmCallReceiver : BroadcastReceiver() {
 
 class FakeCallService : ConnectionService() {
     private val NOTIF_ID = 9999
-    private val CH_ID = "fold8_watch_sync_v8"
+    private val CH_ID = "fold8_watch_sync_v9"
+    private var mediaPlayer: MediaPlayer? = null
+    private var speechRecognizer: SpeechRecognizer? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var isCallActive = false
+    private val chatHistory = JSONArray()
 
     override fun onCreateIncomingConnection(account: PhoneAccountHandle?, req: ConnectionRequest?): Connection {
         val extras = req?.extras
@@ -349,7 +354,6 @@ class FakeCallService : ConnectionService() {
             cleanNum.dropLast(1) + (if (last == '9') '8' else (last + 1))
         } else "01098765432"
 
-        // [핵심 해결] 통화목록(최근 기록)에도 이름이 영구적으로 표시되도록 이름표를 유지합니다!
         ensureContactForCallLog(callerName, tempNum)
 
         val conn = object : Connection() {
@@ -357,16 +361,19 @@ class FakeCallService : ConnectionService() {
                 super.onAnswer()
                 clearWatchAlert()
                 setActive()
+                isCallActive = true
+                // 전화를 받는 순간 AI 음성통화 모드가 켜져 있으면 즉시 사람 목소리 시작!
+                startAiConversationIfEnabled(callerName)
             }
             override fun onReject() {
                 super.onReject()
-                clearWatchAlert()
+                stopAiAndCleanUp()
                 setDisconnected(DisconnectCause(DisconnectCause.REJECTED))
                 destroy()
             }
             override fun onDisconnect() {
                 super.onDisconnect()
-                clearWatchAlert()
+                stopAiAndCleanUp()
                 setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
                 destroy()
             }
@@ -379,38 +386,196 @@ class FakeCallService : ConnectionService() {
         return conn
     }
 
+    private fun startAiConversationIfEnabled(callerName: String) {
+        val prefs = getSharedPreferences("TeamCallPrefs", Context.MODE_PRIVATE)
+        val useAi = prefs.getBoolean("USE_AI", false)
+        val apiKey = prefs.getString("OPENAI_KEY", "") ?: ""
+        val prompt = prefs.getString("SAVED_PROMPT", "여보세요, 통화 가능하십니까?") ?: ""
+        val voice = prefs.getString("VOICE_TYPE", "onyx") ?: "onyx"
+
+        if (!useAi || apiKey.isEmpty()) return
+
+        // AI에게 상대방 역할 부여
+        val sysMsg = JSONObject().apply {
+            put("role", "system")
+            put("content", "당신은 지금 전화를 건 '$callerName'입니다. 실제 전화 통화처럼 1~2문장으로 짧고 자연스러운 구어체로만 대답하세요. 첫 상황/대사 지시: $prompt")
+        }
+        chatHistory.put(sysMsg)
+
+        // 전화를 받자마자 0.8초 뒤에 AI가 먼저 첫마디를 사람 목소리로 건넴!
+        Thread {
+            try {
+                Thread.sleep(800)
+                if (!isCallActive) return@Thread
+                speakWithOpenAi(apiKey, voice, prompt) {
+                    listenUserReply(apiKey, voice)
+                }
+            } catch (e: Exception) {}
+        }.start()
+    }
+
+    // 오픈AI 최고급 사람 목소리(Onyx / Nova)를 생성해 수화기로 들려주는 함수
+    private fun speakWithOpenAi(apiKey: String, voice: String, textToSpeak: String, onDone: () -> Unit) {
+        Thread {
+            try {
+                val url = URL("https://api.openai.com/v1/audio/speech")
+                val conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    setRequestProperty("Authorization", "Bearer $apiKey")
+                    setRequestProperty("Content-Type", "application/json")
+                    doOutput = true
+                }
+
+                val body = JSONObject().apply {
+                    put("model", "tts-1")
+                    put("input", textToSpeak)
+                    put("voice", voice)
+                }
+                conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+
+                val tempFile = File(cacheDir, "ai_voice.mp3")
+                conn.inputStream.use { input ->
+                    FileOutputStream(tempFile).use { output -> input.copyTo(output) }
+                }
+
+                mainHandler.post {
+                    if (!isCallActive) return@post
+                    try {
+                        mediaPlayer?.release()
+                        mediaPlayer = MediaPlayer().apply {
+                            setAudioAttributes(
+                                AudioAttributes.Builder()
+                                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                    .build()
+                            )
+                            setDataSource(tempFile.absolutePath)
+                            prepare()
+                            setOnCompletionListener { onDone() }
+                            start()
+                        }
+                    } catch (e: Exception) {}
+                }
+            } catch (e: Exception) {}
+        }.start()
+    }
+
+    // 내가 수화기에 대고 말하면 알아듣고 AI 두뇌(GPT-4o-mini)가 다음 대답을 만드는 함수
+    private fun listenUserReply(apiKey: String, voice: String) {
+        mainHandler.post {
+            if (!isCallActive) return@post
+            try {
+                speechRecognizer?.destroy()
+                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+                val srIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
+                }
+                speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+                    override fun onResults(results: Bundle?) {
+                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        val userText = matches?.firstOrNull() ?: ""
+                        if (userText.isNotBlank() && isCallActive) {
+                            askGptAndSpeak(apiKey, voice, userText)
+                        } else if (isCallActive) {
+                            listenUserReply(apiKey, voice)
+                        }
+                    }
+                    override fun onError(error: Int) {
+                        if (isCallActive) mainHandler.postDelayed({ listenUserReply(apiKey, voice) }, 1000)
+                    }
+                    override fun onReadyForSpeech(params: Bundle?) {}
+                    override fun onBeginningOfSpeech() {}
+                    override fun onRmsChanged(rmsdB: Float) {}
+                    override fun onBufferReceived(buffer: ByteArray?) {}
+                    override fun onEndOfSpeech() {}
+                    override fun onPartialResults(partialResults: Bundle?) {}
+                    override fun onEvent(eventType: Int, params: Bundle?) {}
+                })
+                speechRecognizer?.startListening(srIntent)
+            } catch (e: Exception) {}
+        }
+    }
+
+    private fun askGptAndSpeak(apiKey: String, voice: String, userText: String) {
+        Thread {
+            try {
+                chatHistory.put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", userText)
+                })
+
+                val url = URL("https://api.openai.com/v1/chat/completions")
+                val conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    setRequestProperty("Authorization", "Bearer $apiKey")
+                    setRequestProperty("Content-Type", "application/json")
+                    doOutput = true
+                }
+
+                val reqBody = JSONObject().apply {
+                    put("model", "gpt-4o-mini")
+                    put("messages", chatHistory)
+                    put("max_tokens", 120)
+                }
+                conn.outputStream.use { it.write(reqBody.toString().toByteArray(Charsets.UTF_8)) }
+
+                val resStr = conn.inputStream.bufferedReader().use { it.readText() }
+                val reply = JSONObject(resStr)
+                    .getJSONArray("choices")
+                    .getJSONObject(0)
+                    .getJSONObject("message")
+                    .getString("content")
+
+                chatHistory.put(JSONObject().apply {
+                    put("role", "assistant")
+                    put("content", reply)
+                })
+
+                if (isCallActive) {
+                    speakWithOpenAi(apiKey, voice, reply) {
+                        listenUserReply(apiKey, voice)
+                    }
+                }
+            } catch (e: Exception) {}
+        }.start()
+    }
+
+    private fun stopAiAndCleanUp() {
+        isCallActive = false
+        clearWatchAlert()
+        mainHandler.post {
+            try { mediaPlayer?.stop(); mediaPlayer?.release(); mediaPlayer = null } catch (e: Exception) {}
+            try { speechRecognizer?.destroy(); speechRecognizer = null } catch (e: Exception) {}
+        }
+    }
+
     private fun ensureContactForCallLog(name: String, number: String) {
         try {
-            // 이전에 만든 같은 번호의 임시 연락처가 있으면 먼저 정리 후 최신 이름으로 등록
             val lookupUri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
             contentResolver.query(lookupUri, arrayOf(ContactsContract.PhoneLookup.CONTACT_ID), null, null, null)?.use { c ->
                 while (c.moveToNext()) {
-                    val contactId = c.getLong(0)
                     contentResolver.delete(
                         ContactsContract.RawContacts.CONTENT_URI,
                         "${ContactsContract.RawContacts.CONTACT_ID}=?",
-                        arrayOf(contactId.toString())
+                        arrayOf(c.getLong(0).toString())
                     )
                 }
             }
-
             val rawUri = contentResolver.insert(ContactsContract.RawContacts.CONTENT_URI, ContentValues())
             val rawId = ContentUris.parseId(rawUri ?: return)
 
-            val nameValues = ContentValues().apply {
+            contentResolver.insert(ContactsContract.Data.CONTENT_URI, ContentValues().apply {
                 put(ContactsContract.Data.RAW_CONTACT_ID, rawId)
                 put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE)
                 put(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, name)
-            }
-            contentResolver.insert(ContactsContract.Data.CONTENT_URI, nameValues)
-
-            val phoneValues = ContentValues().apply {
+            })
+            contentResolver.insert(ContactsContract.Data.CONTENT_URI, ContentValues().apply {
                 put(ContactsContract.Data.RAW_CONTACT_ID, rawId)
                 put(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE)
                 put(ContactsContract.CommonDataKinds.Phone.NUMBER, number)
                 put(ContactsContract.CommonDataKinds.Phone.TYPE, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
-            }
-            contentResolver.insert(ContactsContract.Data.CONTENT_URI, phoneValues)
+            })
         } catch (e: Exception) {}
     }
 
@@ -424,18 +589,14 @@ class FakeCallService : ConnectionService() {
                 }
                 nm.createNotificationChannel(ch)
             }
-            val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Notification.Builder(this, CH_ID)
-            } else {
-                @Suppress("DEPRECATION")
-                Notification.Builder(this)
-            }
+            val b = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(this, CH_ID)
+            else @Suppress("DEPRECATION") Notification.Builder(this)
+
             b.setSmallIcon(android.R.drawable.sym_action_call)
                 .setContentTitle(name)
                 .setContentText("수신전화")
                 .setCategory(Notification.CATEGORY_CALL)
                 .setOngoing(true)
-
             nm.notify(NOTIF_ID, b.build())
         } catch (e: Exception) {}
     }
